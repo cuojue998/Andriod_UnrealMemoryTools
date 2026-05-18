@@ -22,6 +22,10 @@ The program ships with both:
 
 If a dedicated profile fails to initialize on a newer game build, AutoUEDump automatically falls back to AutoFix and clearly tells you so in the UI.
 
+### Preview
+
+![English UI](EN.jpg)
+
 ### Features
 
 - ImGui overlay UI (Vulkan, FreeType, Chinese / English switch at runtime)
@@ -165,6 +169,10 @@ For learning, reverse-engineering practice, and personal research only. **Do not
 - **AutoFix（通用兜底）**：UE4 / UE5 通用，通过特征码暴搜 `GNames`、`FNamePool`、`GUObjectArray`，并在运行时修补结构偏移
 
 专用 Profile 在新版游戏上失效时会**自动回退到 AutoFix**，并在 UI 上明确标出"已回退"。
+
+### 界面预览
+
+![中文界面](CH.jpg)
 
 ### 特性
 
