@@ -1,0 +1,1324 @@
+#include <algorithm>
+#include <cerrno>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <dirent.h>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <thread>
+#include <unordered_map>
+#include <vector>
+
+#include "Utils/Logger.hpp"
+#include "Utils/ProgressUtils.hpp"
+
+#include "Dumper.hpp"
+
+#include "UE/UEMemory.hpp"
+#include "UE/UEGameProfile.hpp"
+
+#include "UE/UEGameProfiles/ArenaBreakout.hpp"
+#include "UE/UEGameProfiles/AutoFix.hpp"
+#include "UE/UEGameProfiles/DeltaForce.hpp"
+#include "UE/UEGameProfiles/Farlight.hpp"
+#include "UE/UEGameProfiles/NRC.hpp"
+#include "UE/UEGameProfiles/PUBG.hpp"
+#include "UE/UEGameProfiles/Sfps2.hpp"
+#include "UE/UEGameProfiles/Valorant.hpp"
+
+#include "Android_draw/draw.h"
+#include "Android_Graphics/GraphicsManager.h"
+
+std::vector<IGameProfile *> UE_Games = {
+    new ArenaBreakoutProfile(),
+    new DeltaForceProfile(),
+    new FarlightProfile(),
+    new ShuishaProfile(),
+    new ValorantProfile(),
+    new NRCProfile(),
+    new PUBGProfile(),
+};
+
+#define kUEDUMPER_VERSION "1.0.0"
+
+namespace
+{
+    constexpr const char *kOutputDirectory = "/sdcard/AutoUEDump";
+    constexpr size_t kMaxLogLines = 1500;
+
+    enum class UiLang { ZH = 0, EN = 1 };
+    UiLang gUiLang = UiLang::ZH;
+
+    inline const char *Tr(const char *zh, const char *en)
+    {
+        return gUiLang == UiLang::ZH ? zh : en;
+    }
+
+    struct AutoProcessCandidate
+    {
+        pid_t pid = 0;
+        std::string package;
+        std::string profileName;
+        bool dedicated = false;
+    };
+
+    struct ProbeOffsetEntry
+    {
+        std::string name;
+        uintptr_t value = 0;
+        uintptr_t relative = 0;
+        bool found = false;
+    };
+
+    struct StructFieldEntry
+    {
+        std::string name;
+        std::string type;
+        uintptr_t offset = 0;
+        bool found = false;
+        std::string description;
+    };
+
+    struct StructGroup
+    {
+        std::string name;
+        std::vector<StructFieldEntry> fields;
+    };
+
+    struct ProbeResult
+    {
+        bool valid = false;
+        bool success = false;
+        std::string package;
+        std::string profileName;
+        bool dedicated = false;
+        uintptr_t baseAddress = 0;
+        std::vector<ProbeOffsetEntry> offsets;
+        std::vector<StructGroup> structGroups;
+        IGameProfile *profile = nullptr;
+        std::unique_ptr<AutoFixProfile> autoProfileOwner;
+    };
+
+    struct DumpUiState
+    {
+        std::mutex mutex;
+        std::vector<std::string> logLines;
+        std::string phase = "空闲";
+        std::string activePackage;
+        std::string resultPath;
+        std::string lastError;
+        bool probeRunning = false;
+        bool probeFinished = false;
+        bool probeSuccess = false;
+        bool dumpRunning = false;
+        bool dumpFinished = false;
+        bool dumpSuccess = false;
+        bool soDumpRunning = false;
+        bool soDumpFinished = false;
+        bool soDumpSuccess = false;
+        std::string soDumpPath;
+        int objectsPercent = 0;
+        int dumpPercent = 0;
+        std::vector<ProbeOffsetEntry> probeOffsets;
+        std::vector<StructGroup> probeStructGroups;
+        std::string probedPackage;
+        std::string probedProfileName;
+    };
+
+    DumpUiState gDumpUiState;
+    std::vector<AutoProcessCandidate> gCandidates;
+    int gSelectedIndex = 0;
+    std::thread gWorkerThread;
+    ProbeResult gProbeResult;
+
+    bool IsNumericName(const char *s)
+    {
+        if (!s || !*s) return false;
+        for (const char *p = s; *p; ++p)
+        {
+            if (*p < '0' || *p > '9')
+                return false;
+        }
+        return true;
+    }
+
+    bool HasUnrealLib(pid_t pid)
+    {
+        auto maps = KittyMemoryEx::getAllMaps(pid);
+        for (const auto &m : maps)
+        {
+            if (m.pathname.find("libUE4.so") != std::string::npos ||
+                m.pathname.find("libUnreal.so") != std::string::npos)
+                return true;
+        }
+        return false;
+    }
+
+    std::vector<AutoProcessCandidate> FindAutoProcessCandidates()
+    {
+        std::unordered_map<std::string, AutoProcessCandidate> candidates;
+
+        for (auto *profile : UE_Games)
+        {
+            for (const auto &pkg : profile->GetAppIDs())
+            {
+                auto pids = KittyMemoryEx::getPIDsOf(pkg);
+                for (pid_t pid : pids)
+                    candidates[pkg] = {pid, pkg, profile->GetAppName(), true};
+            }
+        }
+
+        DIR *dir = opendir("/proc");
+        if (!dir) return {};
+
+        dirent *entry = nullptr;
+        while ((entry = readdir(dir)) != nullptr)
+        {
+            if (!IsNumericName(entry->d_name))
+                continue;
+
+            pid_t pid = static_cast<pid_t>(atoi(entry->d_name));
+            if (pid <= 0)
+                continue;
+
+            std::string processName = KittyMemoryEx::getProcessName(pid);
+            if (processName.empty() || candidates.count(processName) > 0)
+                continue;
+            if (!HasUnrealLib(pid))
+                continue;
+
+            candidates[processName] = {pid, processName, "自动识别 (UE4/UE5 通用)", false};
+        }
+
+        closedir(dir);
+
+        std::vector<AutoProcessCandidate> result;
+        result.reserve(candidates.size());
+        for (const auto &it : candidates)
+            result.push_back(it.second);
+
+        std::sort(result.begin(), result.end(), [](const AutoProcessCandidate &a, const AutoProcessCandidate &b)
+        {
+            if (a.dedicated != b.dedicated)
+                return a.dedicated > b.dedicated;
+            return a.package < b.package;
+        });
+        return result;
+    }
+
+    std::string BuildDumpFileBanner(const std::string &fileName)
+    {
+        if (fileName.size() >= 5 && fileName.substr(fileName.size() - 5) == ".json")
+            return {};
+
+        return "// 创作者: 曦曦(DreamFekk) https://github.com/DreamFekk\n"
+               "// 禁止圈钱盗卖\n\n";
+    }
+
+    void PushUiLog(char level, const std::string &message)
+    {
+        std::lock_guard<std::mutex> lock(gDumpUiState.mutex);
+        gDumpUiState.logLines.push_back(std::string(1, level) + ": " + message);
+        if (gDumpUiState.logLines.size() > kMaxLogLines)
+        {
+            gDumpUiState.logLines.erase(
+                gDumpUiState.logLines.begin(),
+                gDumpUiState.logLines.begin() + (gDumpUiState.logLines.size() - kMaxLogLines));
+        }
+    }
+
+    void LoggerSink(char level, const char *message)
+    {
+        PushUiLog(level, message ? message : "");
+    }
+
+    void SetDumpPhase(const std::string &phase)
+    {
+        std::lock_guard<std::mutex> lock(gDumpUiState.mutex);
+        gDumpUiState.phase = phase;
+    }
+
+    void SetProgress(int objectsPercent, int dumpPercent)
+    {
+        std::lock_guard<std::mutex> lock(gDumpUiState.mutex);
+        if (objectsPercent >= 0)
+            gDumpUiState.objectsPercent = objectsPercent;
+        if (dumpPercent >= 0)
+            gDumpUiState.dumpPercent = dumpPercent;
+    }
+
+    void BeginProbeState(const AutoProcessCandidate &candidate)
+    {
+        std::lock_guard<std::mutex> lock(gDumpUiState.mutex);
+        gDumpUiState.probeRunning = true;
+        gDumpUiState.probeFinished = false;
+        gDumpUiState.probeSuccess = false;
+        gDumpUiState.dumpRunning = false;
+        gDumpUiState.dumpFinished = false;
+        gDumpUiState.dumpSuccess = false;
+        gDumpUiState.phase = "探针准备中";
+        gDumpUiState.activePackage = candidate.package;
+        gDumpUiState.probedPackage = candidate.package;
+        gDumpUiState.probedProfileName = candidate.profileName;
+        gDumpUiState.resultPath.clear();
+        gDumpUiState.lastError.clear();
+        gDumpUiState.objectsPercent = 0;
+        gDumpUiState.dumpPercent = 0;
+        gDumpUiState.probeOffsets.clear();
+        gDumpUiState.probeStructGroups.clear();
+        gDumpUiState.logLines.clear();
+    }
+
+    void FinishProbeState(bool success, const std::vector<ProbeOffsetEntry> &offsets,
+                          const std::vector<StructGroup> &structGroups, const std::string &lastError)
+    {
+        std::lock_guard<std::mutex> lock(gDumpUiState.mutex);
+        gDumpUiState.probeRunning = false;
+        gDumpUiState.probeFinished = true;
+        gDumpUiState.probeSuccess = success;
+        gDumpUiState.phase = success ? "探针完成" : "探针失败";
+        gDumpUiState.probeOffsets = offsets;
+        gDumpUiState.probeStructGroups = structGroups;
+        gDumpUiState.lastError = lastError;
+    }
+
+    void BeginDumpState(const std::string &package)
+    {
+        std::lock_guard<std::mutex> lock(gDumpUiState.mutex);
+        gDumpUiState.dumpRunning = true;
+        gDumpUiState.dumpFinished = false;
+        gDumpUiState.dumpSuccess = false;
+        gDumpUiState.phase = "Dump 准备中";
+        gDumpUiState.activePackage = package;
+        gDumpUiState.resultPath.clear();
+        gDumpUiState.lastError.clear();
+        gDumpUiState.objectsPercent = 0;
+        gDumpUiState.dumpPercent = 0;
+    }
+
+    void FinishDumpState(bool success, const std::string &resultPath, const std::string &lastError)
+    {
+        std::lock_guard<std::mutex> lock(gDumpUiState.mutex);
+        gDumpUiState.dumpRunning = false;
+        gDumpUiState.dumpFinished = true;
+        gDumpUiState.dumpSuccess = success;
+        gDumpUiState.phase = success ? "完成" : "失败";
+        gDumpUiState.resultPath = resultPath;
+        gDumpUiState.lastError = lastError;
+        if (success)
+        {
+            gDumpUiState.objectsPercent = 100;
+            gDumpUiState.dumpPercent = 100;
+        }
+    }
+
+    void RefreshCandidates()
+    {
+        const std::string previousPackage =
+            (gSelectedIndex >= 0 && gSelectedIndex < static_cast<int>(gCandidates.size()))
+                ? gCandidates[gSelectedIndex].package
+                : std::string();
+
+        gCandidates = FindAutoProcessCandidates();
+        gSelectedIndex = 0;
+
+        if (!previousPackage.empty())
+        {
+            for (size_t i = 0; i < gCandidates.size(); ++i)
+            {
+                if (gCandidates[i].package == previousPackage)
+                {
+                    gSelectedIndex = static_cast<int>(i);
+                    break;
+                }
+            }
+        }
+
+        if (gCandidates.empty())
+            PushUiLog('W', "未检测到正在运行的 Unreal Engine 进程。");
+        else
+            PushUiLog('I', "检测到 " + std::to_string(gCandidates.size()) + " 个 Unreal Engine 进程。");
+    }
+
+    bool SaveDumpBuffers(const std::unordered_map<std::string, BufferFmt> &dumpbuffersMap, const std::string &dumpGameDir)
+    {
+        LOGI("正在保存文件...");
+        for (const auto &it : dumpbuffersMap)
+        {
+            if (it.first.empty())
+                continue;
+
+            std::string path = KittyUtils::String::Fmt("%s/%s", dumpGameDir.c_str(), it.first.c_str());
+            std::string banner = BuildDumpFileBanner(it.first);
+            if (banner.empty())
+            {
+                if (!it.second.writeBufferToFile(path))
+                    return false;
+            }
+            else
+            {
+                BufferFmt finalBuf;
+                finalBuf.append("{}", banner);
+                finalBuf.append("{}", it.second.read());
+                if (!finalBuf.writeBufferToFile(path))
+                    return false;
+            }
+        }
+        return true;
+    }
+
+    std::vector<ProbeOffsetEntry> CollectProbeOffsets(IGameProfile *profile)
+    {
+        std::vector<ProbeOffsetEntry> offsets;
+        if (!profile)
+            return offsets;
+
+        const auto *vars = profile->GetUEVars();
+        if (!vars)
+            return offsets;
+
+        const uintptr_t base = vars->GetBaseAddress();
+        auto add = [&](const char *name, uintptr_t value)
+        {
+            ProbeOffsetEntry e;
+            e.name = name;
+            e.value = value;
+            e.relative = (value && base && value >= base) ? (value - base) : 0;
+            e.found = value != 0;
+            offsets.push_back(std::move(e));
+        };
+
+        add("BaseAddress", base);
+        add("GUObjectArray", vars->GetGUObjectsArrayPtr());
+        add("ObjObjects", vars->GetObjObjectsPtr());
+        add(profile->IsUsingFNamePool() ? "FNamePool" : "GNames", vars->GetNamesPtr());
+        add("ProcessEvent", vars->GetProcessEvent());
+        add("StaticFindObject", vars->GetStaticFindObject());
+        add("FrameCount", vars->GetFrameCount());
+        add("Matrix", vars->GetMatrix());
+        add("Physx", vars->GetPhysx());
+        add("NativeAndroidApp", vars->GetNativeAndroidApp());
+        return offsets;
+    }
+
+    std::vector<StructGroup> CollectStructGroups(IGameProfile *profile)
+    {
+        std::vector<StructGroup> groups;
+        if (!profile)
+            return groups;
+
+        const auto *vars = profile->GetUEVars();
+        if (!vars)
+            return groups;
+
+        UE_Offsets *off = vars->GetOffsets();
+        if (!off)
+            return groups;
+
+        auto pushField = [](StructGroup &g, const char *name, const char *type,
+                            uintptr_t offset, const char *desc, bool allowZero = false)
+        {
+            StructFieldEntry e;
+            e.name = name;
+            e.type = type;
+            e.offset = offset;
+            e.found = allowZero ? true : (offset != 0);
+            e.description = desc ? desc : "";
+            g.fields.push_back(std::move(e));
+        };
+
+        // 基础指针组
+        {
+            StructGroup g;
+            g.name = "基础";
+            const uintptr_t base = vars->GetBaseAddress();
+            auto pushAbs = [&](const char *name, const char *type, uintptr_t value, const char *desc)
+            {
+                StructFieldEntry e;
+                e.name = name;
+                e.type = type;
+                e.offset = (value && base && value >= base) ? (value - base) : value;
+                e.found = value != 0;
+                e.description = desc;
+                g.fields.push_back(std::move(e));
+            };
+            pushAbs("BaseAddress", "uintptr_t", base, "可执行模块基址");
+            pushAbs("GUObjectArray", "FUObjectArray*", vars->GetGUObjectsArrayPtr(), "全局对象数组指针 (相对基址)");
+            pushAbs("ObjObjects", "FChunkedFixedUObjectArray*", vars->GetObjObjectsPtr(), "ObjObjects 指针 (相对基址)");
+            pushAbs(profile->IsUsingFNamePool() ? "FNamePool" : "GNames",
+                    profile->IsUsingFNamePool() ? "FNamePool*" : "TStaticIndirectArrayThreadSafeRead*",
+                    vars->GetNamesPtr(), "名称池/全局名称表 (相对基址)");
+            pushAbs("ProcessEvent", "void*", vars->GetProcessEvent(), "ProcessEvent 函数地址 (相对基址)");
+            pushAbs("StaticFindObject", "void*", vars->GetStaticFindObject(), "StaticFindObject 函数地址 (相对基址)");
+            pushAbs("FrameCount", "uint64*", vars->GetFrameCount(), "GFrameCounter 地址 (相对基址)");
+            pushAbs("Matrix", "FMatrix*", vars->GetMatrix(), "ViewProjection 矩阵地址 (相对基址)");
+            pushAbs("Physx", "void*", vars->GetPhysx(), "PhysX 全局指针 (相对基址)");
+            pushAbs("NativeAndroidApp", "android_app*", vars->GetNativeAndroidApp(), "GNativeAndroidApp (相对基址)");
+            groups.push_back(std::move(g));
+        }
+
+        // UObject
+        {
+            StructGroup g;
+            g.name = "UObject";
+            pushField(g, "VTable", "void*", 0, "虚函数表 (固定 0)", true);
+            pushField(g, "ObjectFlags", "EObjectFlags", off->UObject.ObjectFlags, "对象标志", true);
+            pushField(g, "InternalIndex", "int32", off->UObject.InternalIndex, "GUObjectArray 中的索引", true);
+            pushField(g, "ClassPrivate", "UClass*", off->UObject.ClassPrivate, "对象所属类");
+            pushField(g, "NamePrivate", "FName", off->UObject.NamePrivate, "对象名称");
+            pushField(g, "OuterPrivate", "UObject*", off->UObject.OuterPrivate, "外部 (Outer) 对象");
+            groups.push_back(std::move(g));
+        }
+
+        // UField
+        {
+            StructGroup g;
+            g.name = "UField";
+            pushField(g, "Next", "UField*", off->UField.Next, "链表下一个 UField");
+            groups.push_back(std::move(g));
+        }
+
+        // UStruct
+        {
+            StructGroup g;
+            g.name = "UStruct";
+            pushField(g, "SuperStruct", "UStruct*", off->UStruct.SuperStruct, "父结构 (基类)");
+            pushField(g, "Children", "UField*", off->UStruct.Children, "子字段链表");
+            pushField(g, "ChildProperties", "FField*", off->UStruct.ChildProperties, "子属性链表 (UE5)");
+            pushField(g, "PropertiesSize", "int32", off->UStruct.PropertiesSize, "属性总大小");
+            groups.push_back(std::move(g));
+        }
+
+        // UClass
+        {
+            StructGroup g;
+            g.name = "UClass";
+            pushField(g, "(继承自 UStruct)", "-", 0, "UClass 复用 UStruct 全部偏移", true);
+            groups.push_back(std::move(g));
+        }
+
+        // UFunction
+        {
+            StructGroup g;
+            g.name = "UFunction";
+            pushField(g, "EFunctionFlags", "EFunctionFlags", off->UFunction.EFunctionFlags, "函数标志");
+            pushField(g, "NumParams", "uint8", off->UFunction.NumParams, "参数个数");
+            pushField(g, "ParamSize", "uint16", off->UFunction.ParamSize, "参数总大小");
+            pushField(g, "Func", "void*", off->UFunction.Func, "函数指针 (Native)");
+            groups.push_back(std::move(g));
+        }
+
+        // FField + FProperty (UE 4.25+ / UE5)
+        {
+            StructGroup g;
+            g.name = "FField+FProperty";
+            pushField(g, "FField.ClassPrivate", "FFieldClass*", off->FField.ClassPrivate, "FField 所属类");
+            pushField(g, "FField.Next", "FField*", off->FField.Next, "下一个 FField");
+            pushField(g, "FField.NamePrivate", "FName", off->FField.NamePrivate, "FField 名称");
+            pushField(g, "FField.FlagsPrivate", "EObjectFlags", off->FField.FlagsPrivate, "FField 标志");
+            pushField(g, "FProperty.ArrayDim", "int32", off->FProperty.ArrayDim, "数组维度");
+            pushField(g, "FProperty.ElementSize", "int32", off->FProperty.ElementSize, "单元素大小");
+            pushField(g, "FProperty.PropertyFlags", "uint64", off->FProperty.PropertyFlags, "属性标志");
+            pushField(g, "FProperty.Offset_Internal", "int32", off->FProperty.Offset_Internal, "属性内部偏移");
+            pushField(g, "FProperty.Size", "size_t", off->FProperty.Size, "FProperty 总大小");
+            pushField(g, "UProperty.ArrayDim", "int32", off->UProperty.ArrayDim, "(旧版) 数组维度");
+            pushField(g, "UProperty.ElementSize", "int32", off->UProperty.ElementSize, "(旧版) 单元素大小");
+            pushField(g, "UProperty.PropertyFlags", "uint64", off->UProperty.PropertyFlags, "(旧版) 属性标志");
+            pushField(g, "UProperty.Offset_Internal", "int32", off->UProperty.Offset_Internal, "(旧版) 属性内部偏移");
+            pushField(g, "UProperty.Size", "size_t", off->UProperty.Size, "(旧版) UProperty 总大小");
+            groups.push_back(std::move(g));
+        }
+
+        // FName / FNameEntry / FNamePool
+        {
+            StructGroup g;
+            g.name = "FName";
+            pushField(g, "FName.ComparisonIndex", "int32", off->FName.ComparisonIndex, "比较索引", true);
+            pushField(g, "FName.DisplayIndex", "int32", off->FName.DisplayIndex, "显示索引");
+            pushField(g, "FName.Number", "int32", off->FName.Number, "Number 字段");
+            pushField(g, "FName.Size", "size_t", off->FName.Size, "FName 结构大小");
+            pushField(g, "FNameEntry.Index", "int32", off->FNameEntry.Index, "FNameEntry 索引");
+            pushField(g, "FNameEntry.Name", "char/wchar*", off->FNameEntry.Name, "FNameEntry 字符串");
+            pushField(g, "FNamePool.Stride", "uint32", off->FNamePool.Stride, "Pool 步长");
+            pushField(g, "FNamePool.BlocksBit", "uint32", off->FNamePool.BlocksBit, "Block 位宽");
+            pushField(g, "FNamePool.BlocksOff", "uint32", off->FNamePool.BlocksOff, "Block 起始偏移");
+            pushField(g, "FNamePoolEntry.Header", "uint16", off->FNamePoolEntry.Header, "PoolEntry 头");
+            groups.push_back(std::move(g));
+        }
+
+        // FUObjectArray / TUObjectArray / FUObjectItem
+        {
+            StructGroup g;
+            g.name = "ObjectArray";
+            pushField(g, "FUObjectArray.ObjObjects", "FChunkedFixedUObjectArray", off->FUObjectArray.ObjObjects, "ObjObjects 偏移", true);
+            pushField(g, "TUObjectArray.Objects", "void**", off->TUObjectArray.Objects, "对象指针表", true);
+            pushField(g, "TUObjectArray.NumElements", "int32", off->TUObjectArray.NumElements, "元素数量");
+            pushField(g, "TUObjectArray.NumElementsPerChunk", "int32", off->TUObjectArray.NumElementsPerChunk, "每块元素数量");
+            pushField(g, "FUObjectItem.Object", "UObject*", off->FUObjectItem.Object, "对象指针", true);
+            pushField(g, "FUObjectItem.Size", "size_t", off->FUObjectItem.Size, "ObjectItem 大小");
+            groups.push_back(std::move(g));
+        }
+
+        // UEnum
+        {
+            StructGroup g;
+            g.name = "UEnum";
+            pushField(g, "Names", "TArray<TPair<FName,int64>>", off->UEnum.Names, "枚举名称数组");
+            groups.push_back(std::move(g));
+        }
+
+        return groups;
+    }
+
+    void ExecuteProbe(const AutoProcessCandidate candidate)
+    {
+        BeginProbeState(candidate);
+
+        LOGI("当前使用 UE Dumper %s", kUEDUMPER_VERSION);
+        LOGI("目标包名: %s", candidate.package.c_str());
+        LOGI("进程 ID: %d", candidate.pid);
+        LOGI("==========================");
+
+        SetDumpPhase("初始化内存");
+        LOGI("正在初始化内存...");
+        if (!kMgr.initialize(candidate.pid, EK_MEM_OP_SYSCALL, false) &&
+            !kMgr.initialize(candidate.pid, EK_MEM_OP_IO, false))
+        {
+            LOGE("初始化 KittyMemoryMgr 失败。");
+            FinishProbeState(false, {}, {}, "ERROR_INIT_MEMORY");
+            return;
+        }
+
+        gProbeResult = ProbeResult{};
+        gProbeResult.package = candidate.package;
+        gProbeResult.profileName = candidate.profileName;
+        gProbeResult.dedicated = candidate.dedicated;
+
+        IGameProfile *matchedProfile = nullptr;
+        for (auto *profile : UE_Games)
+        {
+            for (const auto &pkg : profile->GetAppIDs())
+            {
+                if (candidate.package == pkg)
+                {
+                    matchedProfile = profile;
+                    break;
+                }
+            }
+            if (matchedProfile)
+                break;
+        }
+
+        std::string lastError;
+        bool initOk = false;
+        UEDumper probeDumper{};
+
+        if (matchedProfile)
+        {
+            SetDumpPhase("探测专用 Profile");
+            LOGI("识别到专用 Profile: %s", matchedProfile->GetAppName().c_str());
+            initOk = probeDumper.Init(matchedProfile);
+            if (initOk)
+            {
+                gProbeResult.profile = matchedProfile;
+            }
+            else
+            {
+                std::string err = probeDumper.GetLastError();
+                LOGW("专用 Profile 初始化失败 (%s)，回退到自动 Profile。",
+                     err.empty() ? "未知原因，可能版本偏移不匹配" : err.c_str());
+            }
+        }
+
+        if (!initOk)
+        {
+            SetDumpPhase("探测自动 Profile");
+            LOGI("使用自动 Profile (UE4/UE5 通用) 进行探测。");
+            gProbeResult.autoProfileOwner = std::make_unique<AutoFixProfile>(candidate.package);
+            initOk = probeDumper.Init(gProbeResult.autoProfileOwner.get());
+            if (initOk)
+            {
+                gProbeResult.profile = gProbeResult.autoProfileOwner.get();
+                gProbeResult.profileName = matchedProfile
+                    ? std::string("自动识别 (专用 Profile [") + matchedProfile->GetAppName() + "] 失败回退)"
+                    : std::string("自动识别 (UE4/UE5 通用)");
+                gProbeResult.dedicated = false;
+            }
+        }
+
+        if (!initOk)
+        {
+            lastError = probeDumper.GetLastError();
+            if (lastError.empty())
+                lastError = "ERROR_PROBE_INIT_FAILED";
+            LOGE("探针失败: %s", lastError.c_str());
+            FinishProbeState(false, {}, {}, lastError);
+            return;
+        }
+
+        auto offsets = CollectProbeOffsets(gProbeResult.profile);
+        auto structGroups = CollectStructGroups(gProbeResult.profile);
+        gProbeResult.offsets = offsets;
+        gProbeResult.structGroups = structGroups;
+        gProbeResult.baseAddress = gProbeResult.profile && gProbeResult.profile->GetUEVars()
+                                       ? gProbeResult.profile->GetUEVars()->GetBaseAddress()
+                                       : 0;
+        gProbeResult.valid = true;
+        gProbeResult.success = true;
+
+        LOGI("探针完成，已识别核心偏移：");
+        for (const auto &entry : offsets)
+        {
+            if (entry.found)
+                LOGI("  %s: <Base> + 0x%lX", entry.name.c_str(),
+                     static_cast<unsigned long>(entry.relative));
+            else
+                LOGI("  %s: <未识别>", entry.name.c_str());
+        }
+        LOGI("==========================");
+        FinishProbeState(true, offsets, structGroups, probeDumper.GetLastError());
+    }
+
+    void ExecuteDump(const std::string package)
+    {
+        BeginDumpState(package);
+
+        if (!gProbeResult.valid || !gProbeResult.success || !gProbeResult.profile)
+        {
+            LOGE("请先完成探针流程。");
+            FinishDumpState(false, {}, "ERROR_NO_PROBE_RESULT");
+            return;
+        }
+        if (gProbeResult.package != package)
+        {
+            LOGE("探针目标 (%s) 与 Dump 目标 (%s) 不一致，请重新探测。",
+                 gProbeResult.package.c_str(), package.c_str());
+            FinishDumpState(false, {}, "ERROR_PROBE_MISMATCH");
+            return;
+        }
+
+        const std::string dumpGameDir = std::string(kOutputDirectory) + "/" + package;
+        IOUtils::delete_directory(dumpGameDir);
+        if (IOUtils::mkdir_recursive(dumpGameDir, 0777) == -1)
+        {
+            const int err = errno;
+            LOGE("创建输出目录失败 [\"%s\"]，错误=%d | %s。", kOutputDirectory, err, strerror(err));
+            FinishDumpState(false, dumpGameDir, "ERROR_CREATE_OUTPUT_DIR");
+            return;
+        }
+
+        UEDumper uEDumper{};
+        uEDumper.setDumpExeInfoNotify([](bool finished)
+        {
+            if (!finished) { SetDumpPhase("导出可执行信息"); LOGI("正在导出可执行信息..."); }
+        });
+        uEDumper.setDumpNamesInfoNotify([](bool finished)
+        {
+            if (!finished) { SetDumpPhase("导出名称信息"); LOGI("正在导出名称信息..."); }
+        });
+        uEDumper.setDumpObjectsInfoNotify([](bool finished)
+        {
+            if (!finished) { SetDumpPhase("导出对象信息"); LOGI("正在导出对象信息..."); }
+        });
+        uEDumper.setDumpOffsetsInfoNotify([](bool finished)
+        {
+            if (!finished) { SetDumpPhase("导出偏移信息"); LOGI("正在导出偏移信息..."); }
+        });
+        uEDumper.setObjectsProgressCallback([](const SimpleProgressBar &progress)
+        {
+            SetProgress(progress.getPercentage(), -1);
+        });
+        uEDumper.setDumpProgressCallback([](const SimpleProgressBar &progress)
+        {
+            SetProgress(-1, progress.getPercentage());
+        });
+
+        SetDumpPhase("初始化 Dumper");
+        LOGI("正在初始化 Dumper...");
+        if (!uEDumper.Init(gProbeResult.profile))
+        {
+            std::string err = uEDumper.GetLastError();
+            if (err.empty()) err = "ERROR_INIT_DUMPER";
+            LOGE("初始化 Dumper 失败: %s", err.c_str());
+            FinishDumpState(false, dumpGameDir, err);
+            return;
+        }
+
+        std::unordered_map<std::string, BufferFmt> dumpbuffersMap;
+        const auto dumpStart = std::chrono::steady_clock::now();
+
+        SetDumpPhase("开始 Dump");
+        bool dumpSuccess = uEDumper.Dump(&dumpbuffersMap);
+
+        if (!dumpSuccess && uEDumper.GetLastError().empty())
+        {
+            LOGE("当前游戏暂不支持，请检查包名。");
+            FinishDumpState(false, dumpGameDir, "ERROR_UNSUPPORTED_GAME");
+            return;
+        }
+
+        if (dumpbuffersMap.empty())
+        {
+            LOGE("导出失败，错误 <缓冲区为空>");
+            LOGE("导出状态 <%s>", uEDumper.GetLastError().c_str());
+            FinishDumpState(false, dumpGameDir, uEDumper.GetLastError());
+            return;
+        }
+
+        SetDumpPhase("保存文件");
+        if (!SaveDumpBuffers(dumpbuffersMap, dumpGameDir))
+        {
+            LOGE("保存导出文件失败。");
+            FinishDumpState(false, dumpGameDir, "ERROR_SAVE_FILES");
+            return;
+        }
+        const auto dumpEnd = std::chrono::steady_clock::now();
+        const std::chrono::duration<float, std::milli> dumpDurationMS = dumpEnd - dumpStart;
+        if (!uEDumper.GetLastError().empty())
+            LOGI("导出状态: %s", uEDumper.GetLastError().c_str());
+        LOGI("导出耗时: %.2fms", dumpDurationMS.count());
+        LOGI("导出位置: %s", dumpGameDir.c_str());
+
+        FinishDumpState(true, dumpGameDir, uEDumper.GetLastError());
+    }
+
+    void ExecuteDumpUnrealLib(const std::string package)
+    {
+        {
+            std::lock_guard<std::mutex> lock(gDumpUiState.mutex);
+            gDumpUiState.soDumpRunning = true;
+            gDumpUiState.soDumpFinished = false;
+            gDumpUiState.soDumpSuccess = false;
+            gDumpUiState.soDumpPath.clear();
+            gDumpUiState.phase = "Dump 动态库准备中";
+        }
+
+        auto finish = [&](bool ok, const std::string &path)
+        {
+            std::lock_guard<std::mutex> lock(gDumpUiState.mutex);
+            gDumpUiState.soDumpRunning = false;
+            gDumpUiState.soDumpFinished = true;
+            gDumpUiState.soDumpSuccess = ok;
+            gDumpUiState.soDumpPath = path;
+            gDumpUiState.phase = ok ? "动态库 Dump 完成" : "动态库 Dump 失败";
+        };
+
+        if (!gProbeResult.valid || !gProbeResult.success || !gProbeResult.profile)
+        {
+            LOGE("请先完成探针流程，再 Dump 动态库。");
+            finish(false, {});
+            return;
+        }
+        if (gProbeResult.package != package)
+        {
+            LOGE("探针目标 (%s) 与动态库 Dump 目标 (%s) 不一致。",
+                 gProbeResult.package.c_str(), package.c_str());
+            finish(false, {});
+            return;
+        }
+
+        SetDumpPhase("Dump 动态库");
+        const std::string dumpGameDir = std::string(kOutputDirectory) + "/" + package;
+        if (IOUtils::mkdir_recursive(dumpGameDir, 0777) == -1 && errno != EEXIST)
+        {
+            const int err = errno;
+            LOGE("创建输出目录失败 [\"%s\"]，错误=%d | %s。", dumpGameDir.c_str(), err, strerror(err));
+            finish(false, {});
+            return;
+        }
+
+        auto ue_elf = gProbeResult.profile->GetUnrealELF();
+        if (!ue_elf.isValid())
+        {
+            LOGE("未找到有效的 UE ELF (libUE4.so / libUnreal.so)。");
+            finish(false, {});
+            return;
+        }
+
+        std::string elfPath = ue_elf.filePath();
+        std::string elfName;
+        if (!elfPath.empty())
+        {
+            size_t slash = elfPath.find_last_of('/');
+            elfName = (slash == std::string::npos) ? elfPath : elfPath.substr(slash + 1);
+        }
+        if (elfName.empty())
+            elfName = "libUE4.so";
+
+        std::string dumpSoPath = dumpGameDir + "/" + elfName;
+        const auto t0 = std::chrono::steady_clock::now();
+        LOGI("正在转储 %s (base=0x%lX, size=0x%lX) -> %s",
+             elfName.c_str(),
+             (unsigned long)ue_elf.base(),
+             (unsigned long)(ue_elf.end() - ue_elf.base()),
+             dumpSoPath.c_str());
+
+        if (!kMgr.dumpMemELF(ue_elf, dumpSoPath))
+        {
+            LOGE("动态库转储失败 (写入 %s 失败)。", dumpSoPath.c_str());
+            finish(false, dumpSoPath);
+            return;
+        }
+
+        const auto t1 = std::chrono::steady_clock::now();
+        const std::chrono::duration<float, std::milli> ms = t1 - t0;
+        LOGI("动态库转储完成，耗时 %.2fms。", ms.count());
+        LOGI("文件位置: %s", dumpSoPath.c_str());
+        finish(true, dumpSoPath);
+    }
+
+    void StartProbeSelected()
+    {
+        if (gSelectedIndex < 0 || gSelectedIndex >= static_cast<int>(gCandidates.size()))
+        {
+            PushUiLog('E', "请先选择目标进程。");
+            return;
+        }
+        if (gWorkerThread.joinable())
+            gWorkerThread.join();
+        gWorkerThread = std::thread(ExecuteProbe, gCandidates[gSelectedIndex]);
+    }
+
+    void StartDumpAfterProbe()
+    {
+        if (!gProbeResult.valid || !gProbeResult.success)
+        {
+            PushUiLog('E', "请先成功完成探针流程，再开始 Dump。");
+            return;
+        }
+        if (gWorkerThread.joinable())
+            gWorkerThread.join();
+        gWorkerThread = std::thread(ExecuteDump, gProbeResult.package);
+    }
+
+    void StartDumpUnrealLib()
+    {
+        if (!gProbeResult.valid || !gProbeResult.success)
+        {
+            PushUiLog('E', "请先成功完成探针流程，再 Dump 动态库。");
+            return;
+        }
+        if (gWorkerThread.joinable())
+            gWorkerThread.join();
+        gWorkerThread = std::thread(ExecuteDumpUnrealLib, gProbeResult.package);
+    }
+} // namespace
+
+void RenderAutoUEDumpPanel(bool *main_thread_flag)
+{
+    bool probeRunning = false;
+    bool probeFinished = false;
+    bool probeSuccess = false;
+    bool dumpRunning = false;
+    bool dumpFinished = false;
+    bool dumpSuccess = false;
+    bool soDumpRunning = false;
+    bool soDumpFinished = false;
+    bool soDumpSuccess = false;
+    std::string soDumpPath;
+    int objectsPercent = 0;
+    int dumpPercent = 0;
+    std::string phase;
+    std::string activePackage;
+    std::string resultPath;
+    std::string lastError;
+    std::string probedPackage;
+    std::string probedProfileName;
+    std::vector<ProbeOffsetEntry> probeOffsets;
+    std::vector<StructGroup> probeStructGroups;
+    std::vector<std::string> logLines;
+
+    {
+        std::lock_guard<std::mutex> lock(gDumpUiState.mutex);
+        probeRunning = gDumpUiState.probeRunning;
+        probeFinished = gDumpUiState.probeFinished;
+        probeSuccess = gDumpUiState.probeSuccess;
+        dumpRunning = gDumpUiState.dumpRunning;
+        dumpFinished = gDumpUiState.dumpFinished;
+        dumpSuccess = gDumpUiState.dumpSuccess;
+        soDumpRunning = gDumpUiState.soDumpRunning;
+        soDumpFinished = gDumpUiState.soDumpFinished;
+        soDumpSuccess = gDumpUiState.soDumpSuccess;
+        soDumpPath = gDumpUiState.soDumpPath;
+        objectsPercent = gDumpUiState.objectsPercent;
+        dumpPercent = gDumpUiState.dumpPercent;
+        phase = gDumpUiState.phase;
+        activePackage = gDumpUiState.activePackage;
+        resultPath = gDumpUiState.resultPath;
+        lastError = gDumpUiState.lastError;
+        probedPackage = gDumpUiState.probedPackage;
+        probedProfileName = gDumpUiState.probedProfileName;
+        probeOffsets = gDumpUiState.probeOffsets;
+        probeStructGroups = gDumpUiState.probeStructGroups;
+        logLines = gDumpUiState.logLines;
+    }
+
+    const bool busy = probeRunning || dumpRunning || soDumpRunning;
+    if (!busy && gWorkerThread.joinable())
+        gWorkerThread.join();
+
+    const bool hasSelection = !gCandidates.empty() &&
+                              gSelectedIndex >= 0 &&
+                              gSelectedIndex < static_cast<int>(gCandidates.size());
+    const std::string selectedPackage = hasSelection ? gCandidates[gSelectedIndex].package : std::string();
+    const bool probeMatchesSelection = probeFinished && probeSuccess &&
+                                       !selectedPackage.empty() &&
+                                       selectedPackage == probedPackage;
+
+    // ========== 顶部信息条 ==========
+    ImGui::Text("AutoUEDump  |  %s %s", Tr("版本", "Version"), kUEDUMPER_VERSION);
+    ImGui::SameLine();
+    ImGui::TextDisabled("  %s: %s", Tr("输出", "Output"), kOutputDirectory);
+    ImGui::SameLine();
+    ImGui::Dummy(ImVec2(20.0f, 0.0f));
+    ImGui::SameLine();
+    ImGui::TextDisabled("%s:", Tr("语言", "Language"));
+    ImGui::SameLine();
+    if (ImGui::SmallButton("中文")) gUiLang = UiLang::ZH;
+    ImGui::SameLine();
+    if (ImGui::SmallButton("English")) gUiLang = UiLang::EN;
+    ImGui::Text("%s: 曦曦(DreamFekk) https://github.com/DreamFekk", Tr("创作者", "Author"));
+    ImGui::Text("%s", Tr("禁止盗卖圈钱", "No reselling for profit"));
+    ImGui::Separator();
+
+    // ========== 操作工具栏 ==========
+    ImGui::Text("%s", Tr("操作", "Actions"));
+    ImGui::SameLine();
+    ImGui::Dummy(ImVec2(8.0f, 0.0f));
+    ImGui::SameLine();
+
+    if (busy)
+    {
+        ImGui::BeginDisabled();
+        const char *label = Tr("进行中...", "Working...");
+        if (probeRunning)        label = Tr("探针进行中...", "Probing...");
+        else if (dumpRunning)    label = Tr("Dump 进行中...", "Dumping...");
+        else if (soDumpRunning)  label = Tr("动态库 Dump 进行中...", "Dumping library...");
+        ImGui::Button(label);
+        ImGui::EndDisabled();
+    }
+    else
+    {
+        const bool canProbe = hasSelection;
+        if (!canProbe) ImGui::BeginDisabled();
+        if (ImGui::Button(Tr("开始探测", "Start Probe")))
+            StartProbeSelected();
+        if (!canProbe) ImGui::EndDisabled();
+
+        ImGui::SameLine();
+        const bool canDump = probeMatchesSelection;
+        if (!canDump) ImGui::BeginDisabled();
+        if (ImGui::Button(Tr("开始 Dump", "Start Dump")))
+            StartDumpAfterProbe();
+        if (!canDump) ImGui::EndDisabled();
+
+        ImGui::SameLine();
+        const bool canDumpSo = probeMatchesSelection;
+        if (!canDumpSo) ImGui::BeginDisabled();
+        if (ImGui::Button(Tr("Dump 动态库", "Dump Library")))
+            StartDumpUnrealLib();
+        if (!canDumpSo) ImGui::EndDisabled();
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::BeginTooltip();
+            ImGui::Text("%s", Tr("从内存转储 libUE4.so / libUnreal.so",
+                                  "Dump libUE4.so / libUnreal.so from memory"));
+            ImGui::TextDisabled("%s: %s/<package>/<lib*.so>",
+                                Tr("输出", "Output"), kOutputDirectory);
+            ImGui::EndTooltip();
+        }
+    }
+
+    ImGui::SameLine();
+    if (ImGui::Button(Tr("刷新进程", "Refresh Processes")) && !busy)
+        RefreshCandidates();
+    ImGui::SameLine();
+    if (ImGui::Button(Tr("清空日志", "Clear Logs")))
+    {
+        std::lock_guard<std::mutex> lock(gDumpUiState.mutex);
+        gDumpUiState.logLines.clear();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(Tr("退出", "Exit")))
+        *main_thread_flag = false;
+
+    // 阶段 / 状态行
+    ImGui::Text("%s: %s", Tr("阶段", "Phase"), phase.c_str());
+    if (!activePackage.empty())
+    {
+        ImGui::SameLine();
+        ImGui::TextDisabled(" |  %s: %s", Tr("目标", "Target"), activePackage.c_str());
+    }
+    if (probeFinished)
+    {
+        ImGui::SameLine();
+        ImVec4 c = probeSuccess ? ImVec4(0.35f, 0.95f, 0.35f, 1.0f) : ImVec4(1.0f, 0.35f, 0.35f, 1.0f);
+        ImGui::TextColored(c, probeSuccess ? Tr(" | 探针 OK", " | Probe OK")
+                                           : Tr(" | 探针失败", " | Probe failed"));
+    }
+    if (dumpFinished)
+    {
+        ImGui::SameLine();
+        ImVec4 c = dumpSuccess ? ImVec4(0.35f, 0.95f, 0.35f, 1.0f) : ImVec4(1.0f, 0.35f, 0.35f, 1.0f);
+        ImGui::TextColored(c, dumpSuccess ? Tr(" | Dump OK", " | Dump OK")
+                                          : Tr(" | Dump 失败", " | Dump failed"));
+    }
+    if (soDumpFinished)
+    {
+        ImGui::SameLine();
+        ImVec4 c = soDumpSuccess ? ImVec4(0.35f, 0.95f, 0.35f, 1.0f) : ImVec4(1.0f, 0.35f, 0.35f, 1.0f);
+        ImGui::TextColored(c, soDumpSuccess ? Tr(" | 动态库 OK", " | Lib OK")
+                                            : Tr(" | 动态库失败", " | Lib failed"));
+    }
+    if (!resultPath.empty() && dumpSuccess)
+        ImGui::TextWrapped("%s: %s", Tr("结果路径", "Output Path"), resultPath.c_str());
+    if (!soDumpPath.empty() && soDumpSuccess)
+        ImGui::TextWrapped("%s: %s", Tr("动态库", "Library"), soDumpPath.c_str());
+    if (!lastError.empty())
+        ImGui::TextWrapped("%s: %s", Tr("状态信息", "Status"), lastError.c_str());
+
+    if (objectsPercent > 0)
+    {
+        std::string label = std::string(Tr("对象扫描", "Objects scan")) + " " + std::to_string(objectsPercent) + "%";
+        ImGui::ProgressBar(objectsPercent / 100.0f, ImVec2(-1.0f, 0.0f), label.c_str());
+    }
+    if (dumpPercent > 0)
+    {
+        std::string label = std::string(Tr("Dump 进度", "Dump progress")) + " " + std::to_string(dumpPercent) + "%";
+        ImGui::ProgressBar(dumpPercent / 100.0f, ImVec2(-1.0f, 0.0f), label.c_str());
+    }
+
+    ImGui::Separator();
+
+    // ========== 主体: 左侧进程列表 + 右侧标签页 ==========
+    const float bottomReserved = 240.0f;
+    ImGui::BeginChild("##main_split", ImVec2(0.0f, -bottomReserved), false);
+
+    // ---- 左侧: 进程列表 ----
+    ImGui::BeginChild("##process_pane", ImVec2(360.0f, 0.0f), true);
+    ImGui::Text("%s", Tr("进程列表", "Process List"));
+    ImGui::Separator();
+    if (ImGui::BeginListBox("##processes", ImVec2(-1.0f, -1.0f)))
+    {
+        for (int i = 0; i < static_cast<int>(gCandidates.size()); ++i)
+        {
+            const auto &candidate = gCandidates[i];
+            std::string label = candidate.package + "  | PID " + std::to_string(candidate.pid);
+            if (ImGui::Selectable(label.c_str(), gSelectedIndex == i))
+                gSelectedIndex = i;
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::BeginTooltip();
+                ImGui::Text("%s: %s", Tr("包名", "Package"), candidate.package.c_str());
+                ImGui::Text("PID:  %d", candidate.pid);
+                ImGui::Text("Profile: %s", candidate.profileName.c_str());
+                ImGui::Text("%s: %s", Tr("模式", "Mode"),
+                            candidate.dedicated ? Tr("专用", "Dedicated")
+                                                : Tr("自动", "Auto"));
+                ImGui::EndTooltip();
+            }
+        }
+        ImGui::EndListBox();
+    }
+    ImGui::EndChild();
+
+    ImGui::SameLine();
+
+    // ---- 右侧: 标签页 ----
+    ImGui::BeginChild("##tab_pane", ImVec2(0.0f, 0.0f), true);
+    if (ImGui::BeginTabBar("##ue_tabs", ImGuiTabBarFlags_Reorderable))
+    {
+        const bool hasData = probeFinished && probeSuccess && !probeStructGroups.empty();
+
+        // 摘要标签
+        if (ImGui::BeginTabItem(Tr("摘要", "Summary")))
+        {
+            if (hasSelection)
+            {
+                const auto &candidate = gCandidates[gSelectedIndex];
+                ImGui::Text("%s: %s", Tr("已选包名", "Selected"), candidate.package.c_str());
+                ImGui::Text("PID:      %d", candidate.pid);
+                ImGui::TextWrapped("Profile: %s", candidate.profileName.c_str());
+                ImGui::Text("%s:     %s", Tr("模式", "Mode"),
+                            candidate.dedicated ? Tr("专用", "Dedicated")
+                                                : Tr("自动", "Auto"));
+            }
+            else
+            {
+                ImGui::TextWrapped("%s",
+                    Tr("当前没有找到正在运行的 Unreal Engine 进程，请点击\"刷新进程\"。",
+                       "No running Unreal Engine process found. Click \"Refresh Processes\"."));
+            }
+            ImGui::Separator();
+            if (probeFinished && probeSuccess)
+            {
+                ImGui::TextWrapped("%s: %s", Tr("已探测", "Probed"), probedPackage.c_str());
+                ImGui::TextWrapped("Profile: %s", probedProfileName.c_str());
+                ImGui::TextDisabled("%s",
+                    Tr("提示: 切换其它进程后需重新点击\"开始探测\"。",
+                       "Tip: After switching processes, click \"Start Probe\" again."));
+            }
+            else if (probeFinished)
+            {
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s",
+                    Tr("探针失败，请检查日志或重新探测。",
+                       "Probe failed. Check the logs or try again."));
+            }
+            else
+            {
+                ImGui::TextWrapped("%s",
+                    Tr("尚未探测，请选择进程后点击 \"开始探测\"。",
+                       "Not probed yet. Select a process and click \"Start Probe\"."));
+            }
+            ImGui::EndTabItem();
+        }
+
+        // 各结构体标签
+        if (hasData)
+        {
+            for (const auto &group : probeStructGroups)
+            {
+                if (!ImGui::BeginTabItem(group.name.c_str()))
+                    continue;
+
+                ImGui::TextDisabled("%s",
+                    Tr("自动修补结果 (绿色=已识别, 红色=未识别)",
+                       "Auto-fix result (green = identified, red = unknown)"));
+                ImGuiTableFlags flags = ImGuiTableFlags_Borders |
+                                        ImGuiTableFlags_RowBg |
+                                        ImGuiTableFlags_Resizable |
+                                        ImGuiTableFlags_ScrollY |
+                                        ImGuiTableFlags_SizingStretchProp;
+                if (ImGui::BeginTable("##fields", 5, flags, ImVec2(0.0f, 0.0f)))
+                {
+                    ImGui::TableSetupScrollFreeze(0, 1);
+                    ImGui::TableSetupColumn(Tr("字段", "Field"),  ImGuiTableColumnFlags_WidthStretch, 1.6f);
+                    ImGui::TableSetupColumn(Tr("类型", "Type"),   ImGuiTableColumnFlags_WidthStretch, 1.4f);
+                    ImGui::TableSetupColumn(Tr("偏移", "Offset"), ImGuiTableColumnFlags_WidthStretch, 0.9f);
+                    ImGui::TableSetupColumn(Tr("状态", "Status"), ImGuiTableColumnFlags_WidthStretch, 0.7f);
+                    ImGui::TableSetupColumn(Tr("说明", "Notes"),  ImGuiTableColumnFlags_WidthStretch, 2.4f);
+                    ImGui::TableHeadersRow();
+
+                    for (const auto &f : group.fields)
+                    {
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        ImGui::TextUnformatted(f.name.c_str());
+                        ImGui::TableSetColumnIndex(1);
+                        ImGui::TextUnformatted(f.type.c_str());
+                        ImGui::TableSetColumnIndex(2);
+                        ImGui::Text("0x%lX", static_cast<unsigned long>(f.offset));
+                        ImGui::TableSetColumnIndex(3);
+                        if (f.found)
+                            ImGui::TextColored(ImVec4(0.35f, 0.95f, 0.35f, 1.0f), "%s",
+                                               Tr("已识别", "Identified"));
+                        else
+                            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s",
+                                               Tr("未识别", "Unknown"));
+                        ImGui::TableSetColumnIndex(4);
+                        ImGui::TextWrapped("%s", f.description.c_str());
+                    }
+                    ImGui::EndTable();
+                }
+                ImGui::EndTabItem();
+            }
+        }
+        else
+        {
+            const char *empty = Tr("尚未探测", "Not probed yet");
+            if (ImGui::BeginTabItem("UObject"))            { ImGui::TextDisabled("%s", empty); ImGui::EndTabItem(); }
+            if (ImGui::BeginTabItem("UField"))             { ImGui::TextDisabled("%s", empty); ImGui::EndTabItem(); }
+            if (ImGui::BeginTabItem("UStruct"))            { ImGui::TextDisabled("%s", empty); ImGui::EndTabItem(); }
+            if (ImGui::BeginTabItem("UClass"))             { ImGui::TextDisabled("%s", empty); ImGui::EndTabItem(); }
+            if (ImGui::BeginTabItem("UFunction"))          { ImGui::TextDisabled("%s", empty); ImGui::EndTabItem(); }
+            if (ImGui::BeginTabItem("FField+FProperty"))   { ImGui::TextDisabled("%s", empty); ImGui::EndTabItem(); }
+        }
+
+        ImGui::EndTabBar();
+    }
+    ImGui::EndChild();
+
+    ImGui::EndChild();
+
+    // ========== 底部: 运行日志 ==========
+    ImGui::Separator();
+    ImGui::Text("%s", Tr("运行日志", "Logs"));
+    if (ImGui::BeginChild("##logs", ImVec2(0.0f, 0.0f), true, ImGuiWindowFlags_HorizontalScrollbar))
+    {
+        for (const auto &line : logLines)
+            ImGui::TextUnformatted(line.c_str());
+
+        if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
+            ImGui::SetScrollHereY(1.0f);
+    }
+    ImGui::EndChild();
+}
+
+
+int main()
+{
+    setbuf(stdout, nullptr);
+    setbuf(stderr, nullptr);
+    setbuf(stdin, nullptr);
+
+    Logger::SetSink(LoggerSink);
+    RefreshCandidates();
+
+    ::graphics = GraphicsManager::getGraphicsInterface(GraphicsManager::VULKAN);
+    if (!::graphics)
+    {
+        LOGE("创建图形后端失败。");
+        Logger::SetSink(nullptr);
+        return 1;
+    }
+
+    ::screen_config();
+    ::native_window_screen_x = (::displayInfo.height > ::displayInfo.width ? ::displayInfo.height : ::displayInfo.width);
+    ::native_window_screen_y = (::displayInfo.height > ::displayInfo.width ? ::displayInfo.height : ::displayInfo.width);
+    ::abs_ScreenX = (::displayInfo.height > ::displayInfo.width ? ::displayInfo.height : ::displayInfo.width);
+    ::abs_ScreenY = (::displayInfo.height < ::displayInfo.width ? ::displayInfo.height : ::displayInfo.width);
+
+    ::window = android::ANativeWindowCreator::Create("AutoUEDump", native_window_screen_x, native_window_screen_y, permeate_record);
+    if (!::window)
+    {
+        LOGE("创建 ANativeWindow 失败。");
+        Logger::SetSink(nullptr);
+        return 1;
+    }
+
+    if (!graphics->Init_Render(::window, native_window_screen_x, native_window_screen_y))
+    {
+        LOGE("初始化图形渲染失败。");
+        android::ANativeWindowCreator::Destroy(::window);
+        Logger::SetSink(nullptr);
+        return 1;
+    }
+
+    Touch::Init({(float)::abs_ScreenX, (float)::abs_ScreenY}, false);
+    Touch::setOrientation(displayInfo.orientation);
+    ::init_My_drawdata();
+
+    bool flag = true;
+    while (flag)
+    {
+        drawBegin();
+        if (permeate_record == false)
+            android::ANativeWindowCreator::ProcessMirrorDisplay();
+        graphics->NewFrame();
+        Layout_tick_UI(&flag);
+        graphics->EndFrame();
+    }
+
+    if (gWorkerThread.joinable())
+        gWorkerThread.join();
+
+    Touch::Close();
+    graphics->Shutdown();
+    android::ANativeWindowCreator::Destroy(::window);
+    Logger::SetSink(nullptr);
+    return 0;
+}
