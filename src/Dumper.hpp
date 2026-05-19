@@ -28,7 +28,7 @@ class UEDumper
 public:
     UEDumper() : _profile(nullptr), _dumpExeInfoNotify(nullptr), _dumpNamesInfoNotify(nullptr), _dumpObjectsInfoNotify(nullptr), _objectsProgressCallback(nullptr), _dumpProgressCallback(nullptr) {}
 
-    bool Init(IGameProfile *profile);
+    bool Init(IGameProfile *profile, bool reuseInitializedState = false);
 
     bool Dump(std::unordered_map<std::string, BufferFmt> *outBuffersMap);
 

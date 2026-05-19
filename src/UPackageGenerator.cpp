@@ -3,6 +3,8 @@
 #include "UE/UEMemory.hpp"
 using namespace UEMemory;
 
+#include "AutoFix/NativeFunctionResolver.hpp"
+#include "AutoFix/StructLayout.hpp"
 #include "AutoFix/VirtualFunctionResolver.hpp"
 
 #include <unordered_map>
@@ -55,50 +57,66 @@ void UE_UPackage::GenerateFunction(const UE_UFunction &fn, Function *out)
     out->NumParams = fn.GetNumParams();
     out->ParamSize = fn.GetParamSize();
     out->Func = fn.GetFunc();
+    out->OwnerAddress = reinterpret_cast<uintptr_t>(fn.GetOuter().GetAddress());
 
     auto generateParam = [&](IProperty *prop)
     {
-        auto flags = prop->GetPropertyFlags();
+        if (!prop)
+            return;
 
-        // if property has 'ReturnParm' flag
-        if (flags & CPF_ReturnParm)
+        const auto flags = prop->GetPropertyFlags();
+        const auto type = prop->GetType().second;
+        const auto name = prop->GetName();
+
+        // dump-7 的做法是：函数 ChildProperties 链里的字段默认都视作参数，
+        // 只用 ReturnParm/OutParm/ConstParm 去修饰，而不是强依赖 CPF_Parm。
+        if ((flags & CPF_ReturnParm) || name == "ReturnValue")
         {
-            out->CppName = prop->GetType().second + " " + fn.GetName();
+            out->CppName = type + " " + fn.GetName();
+            return;
         }
-        // if property has 'Parm' flag
-        else if (flags & CPF_Parm)
+
+        if (type.empty() || name.empty())
+            return;
+
+        if (!out->Params.empty())
+            out->Params += ", ";
+
+        if (flags & CPF_ConstParm)
+            out->Params += "const ";
+
+        if (prop->GetArrayDim() > 1)
         {
-            if (prop->GetArrayDim() > 1)
-            {
-                out->Params += fmt::format("{}* {}, ", prop->GetType().second, prop->GetName());
-            }
-            else
-            {
-                if (flags & CPF_OutParm)
-                {
-                    out->Params += fmt::format("{}& {}, ", prop->GetType().second, prop->GetName());
-                }
-                else
-                {
-                    out->Params += fmt::format("{} {}, ", prop->GetType().second, prop->GetName());
-                }
-            }
+            out->Params += fmt::format("{}* {}", type, name);
+            return;
         }
+
+        out->Params += type;
+        if (flags & CPF_OutParm)
+            out->Params += "&";
+        out->Params += " " + name;
     };
 
+    bool usedChildProperties = false;
     for (auto prop = fn.GetChildProperties().Cast<UE_FProperty>(); prop; prop = prop.GetNext().Cast<UE_FProperty>())
     {
+        usedChildProperties = true;
         auto propInterface = prop.GetInterface();
         generateParam(&propInterface);
     }
-    for (auto prop = fn.GetChildren().Cast<UE_UProperty>(); prop; prop = prop.GetNext().Cast<UE_UProperty>())
+
+    // UE4.25+/UE5 优先使用 ChildProperties(FField)；仅在旧链路下回退到 Children(UField)。
+    if (!usedChildProperties)
     {
-        auto propInterface = prop.GetInterface();
-        generateParam(&propInterface);
+        for (auto prop = fn.GetChildren().Cast<UE_UProperty>(); prop; prop = prop.GetNext().Cast<UE_UProperty>())
+        {
+            auto propInterface = prop.GetInterface();
+            generateParam(&propInterface);
+        }
     }
     if (out->Params.size())
     {
-        out->Params.erase(out->Params.size() - 2);
+        // no-op: params are now appended with delimiter-aware logic
     }
 
     if (out->CppName.size() == 0)
@@ -112,12 +130,20 @@ void UE_UPackage::GenerateStruct(const UE_UStruct &object, std::vector<Struct> &
     Struct s;
     s.Name = object.GetName();
     s.FullName = object.GetFullName();
+    const auto layoutFields = AutoFixStructLayout::GetSortedFields(object);
+    const bool useAutoLayout = !layoutFields.empty();
+    const auto &layoutInfo = useAutoLayout ? AutoFixStructLayout::GetStructLayoutInfo(object) : AutoFixStructLayout::StructLayoutInfo{};
 
     s.CppName = "struct ";
+    if (useAutoLayout && layoutInfo.UseExplicitAlignment && layoutInfo.Alignment > 1)
+        s.CppName += fmt::format("alignas(0x{:X}) ", layoutInfo.Alignment);
     s.CppName += object.GetCppName();
 
-    s.Inherited = 0;
-    s.Size = object.GetSize();
+    s.Inherited = useAutoLayout ? std::max(0, AutoFixStructLayout::GetOwnMemberStart(object)) : 0;
+    s.Size = useAutoLayout ? std::max(0, AutoFixStructLayout::GetDisplayStructSize(object)) : object.GetSize();
+    s.Alignment = useAutoLayout ? std::max(1, layoutInfo.Alignment) : 1;
+    s.UseExplicitAlignment = useAutoLayout && layoutInfo.UseExplicitAlignment && layoutInfo.Alignment > 1;
+    s.UsePack = useAutoLayout && layoutInfo.HasReusedTrailingPadding;
 
     if (s.Size == 0)
     {
@@ -130,7 +156,8 @@ void UE_UPackage::GenerateStruct(const UE_UStruct &object, std::vector<Struct> &
     {
         s.CppName += " : ";
         s.CppName += super.GetCppName();
-        s.Inherited = super.GetSize();
+        if (!useAutoLayout)
+            s.Inherited = super.GetSize();
     }
 
     uint32_t offset = s.Inherited;
@@ -196,33 +223,109 @@ void UE_UPackage::GenerateStruct(const UE_UStruct &object, std::vector<Struct> &
         }
     };
 
-    for (auto prop = object.GetChildProperties().Cast<UE_FProperty>(); prop; prop = prop.GetNext().Cast<UE_FProperty>())
+    auto generateLayoutMember = [&](const AutoFixStructLayout::FieldLayoutInfo &fieldInfo)
     {
         Member m;
-        auto propInterface = prop.GetInterface();
-        generateMember(&propInterface, &m);
-        s.Members.push_back(m);
-    }
+        auto propInterface = fieldInfo.Field.GetInterface();
+        m.Size = fieldInfo.TotalSize;
+        if (m.Size == 0)
+            return;
 
-    for (auto child = object.GetChildren(); child; child = child.GetNext())
-    {
-        if (child.IsA<UE_UFunction>())
+        auto type = propInterface.GetType();
+        m.Type = type.second;
+        m.Name = fieldInfo.Field.GetName();
+        m.Offset = fieldInfo.Offset;
+
+        if (m.Offset > offset)
+            UE_UPackage::FillPadding(object, s.Members, offset, bitOffset, m.Offset);
+
+        if (fieldInfo.IsBitfield && type.first == UEPropertyType::BoolProperty && *(uint32_t *)type.second.data() != 'loob')
         {
-            auto fn = child.Cast<UE_UFunction>();
-            Function f;
-            GenerateFunction(fn, &f);
-            s.Functions.push_back(f);
+            auto mask = fieldInfo.FieldMask;
+            uint8_t zeros = 0, ones = 0;
+            while (mask & ~1)
+            {
+                mask >>= 1;
+                zeros++;
+            }
+            while (mask & 1)
+            {
+                mask >>= 1;
+                ones++;
+            }
+            if (zeros > bitOffset)
+            {
+                UE_UPackage::GenerateBitPadding(s.Members, m.Offset, bitOffset, zeros - bitOffset);
+                bitOffset = zeros;
+            }
+            m.Name += fmt::format(" : {}", ones);
+            bitOffset += ones;
+
+            if (bitOffset == 8)
+            {
+                offset = m.Offset + fieldInfo.ElementSize;
+                bitOffset = 0;
+            }
+
+            m.extra = fmt::format("Mask(0x{:X})", fieldInfo.FieldMask);
         }
-        else if (child.IsA<UE_UProperty>())
+        else
         {
-            auto prop = child.Cast<UE_UProperty>();
+            if (fieldInfo.ArrayDim > 1)
+                m.Name += fmt::format("[0x{:X}]", fieldInfo.ArrayDim);
+            offset = m.Offset + m.Size;
+        }
+
+        s.Members.push_back(std::move(m));
+    };
+
+    if (useAutoLayout)
+    {
+        for (const auto &fieldInfo : layoutFields)
+            generateLayoutMember(fieldInfo);
+    }
+    else
+    {
+        for (auto prop = object.GetChildProperties().Cast<UE_FProperty>(); prop; prop = prop.GetNext().Cast<UE_FProperty>())
+        {
             Member m;
             auto propInterface = prop.GetInterface();
             generateMember(&propInterface, &m);
             s.Members.push_back(m);
         }
+
+        for (auto child = object.GetChildren(); child; child = child.GetNext())
+        {
+            if (child.IsA<UE_UFunction>())
+            {
+                auto fn = child.Cast<UE_UFunction>();
+                Function f;
+                GenerateFunction(fn, &f);
+                s.Functions.push_back(f);
+            }
+            else if (child.IsA<UE_UProperty>())
+            {
+                auto prop = child.Cast<UE_UProperty>();
+                Member m;
+                auto propInterface = prop.GetInterface();
+                generateMember(&propInterface, &m);
+                s.Members.push_back(m);
+            }
+        }
     }
 
+    if (useAutoLayout)
+    {
+        for (auto child = object.GetChildren(); child; child = child.GetNext())
+        {
+            if (!child.IsA<UE_UFunction>())
+                continue;
+            auto fn = child.Cast<UE_UFunction>();
+            Function f;
+            GenerateFunction(fn, &f);
+            s.Functions.push_back(f);
+        }
+    }
     if (s.Size > offset)
     {
         UE_UPackage::FillPadding(object, s.Members, offset, bitOffset, s.Size);
@@ -304,6 +407,9 @@ void UE_UPackage::AppendStructsToBuffer(std::vector<Struct> &arr, BufferFmt *pBu
 {
     for (auto &s : arr)
     {
+        if (s.UsePack)
+            pBufFmt->append("#pragma pack(push, 0x1)\n");
+
         pBufFmt->append("// Object: {}\n// Size: 0x{:X} (Inherited: 0x{:X})\n{}\n{{",
                         s.FullName, s.Size, s.Inherited, s.CppName);
 
@@ -330,8 +436,9 @@ void UE_UPackage::AppendStructsToBuffer(std::vector<Struct> &arr, BufferFmt *pBu
                 std::string vtComment;
                 if (f.Func)
                 {
-                    uintptr_t slotOff = AutoFixVTable::FindVTableCallOffset((uintptr_t)f.Func);
-                    uintptr_t realOff = f.Func - baseAddr;
+                    const auto nativeInfo = AutoFixNativeFunctions::ResolveNativeFunctionInfo(f.OwnerAddress, (uintptr_t)f.Func, f.EFlags);
+                    uintptr_t slotOff = nativeInfo.VTableOffset;
+                    uintptr_t realOff = nativeInfo.RealOffset ? nativeInfo.RealOffset : nativeInfo.FuncOffset;
                     if (slotOff)
                     {
                         int vtIdx = AutoFixVTable::OffsetToIndex(slotOff);
@@ -344,7 +451,10 @@ void UE_UPackage::AppendStructsToBuffer(std::vector<Struct> &arr, BufferFmt *pBu
                 pBufFmt->append("\n\n\t// Object: {}\n\t// Flags: [{}]\n\t// Offset: {}\n\t// Params: [ Num({}) Size(0x{:X}) ]\n\t{}({});{}", f.FullName, f.Flags, funcOffset, f.NumParams, f.ParamSize, f.CppName, f.Params, vtComment);
             }
         }
-        pBufFmt->append("\n}};\n\n");
+        pBufFmt->append("\n}};\n");
+        if (s.UsePack)
+            pBufFmt->append("#pragma pack(pop)\n");
+        pBufFmt->append("\n");
     }
 }
 

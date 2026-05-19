@@ -81,6 +81,7 @@ struct UE_Offsets
         uintptr_t Children = 0;
         uintptr_t ChildProperties = 0;
         uintptr_t PropertiesSize = 0;
+        uintptr_t MinAlignment = 0;
     } UStruct;
     struct
     {
@@ -112,6 +113,52 @@ struct UE_Offsets
         uintptr_t Offset_Internal = 0;
         uintptr_t Size = 0;
     } FProperty;
+    struct
+    {
+        uintptr_t PropertyClass = 0;
+    } ObjectProperty;
+    struct
+    {
+        uintptr_t Struct = 0;
+    } StructProperty;
+    struct
+    {
+        uintptr_t Enum = 0;
+    } ByteProperty;
+    struct
+    {
+        uintptr_t Base = 0;
+    } BoolProperty;
+    struct
+    {
+        uintptr_t UnderlayingProp = 0;
+        uintptr_t Enum = 0;
+    } EnumProperty;
+    struct
+    {
+        uintptr_t SignatureFunction = 0;
+    } DelegateProperty;
+    struct
+    {
+        uintptr_t Inner = 0;
+    } ArrayProperty;
+    struct
+    {
+        uintptr_t ElementProp = 0;
+    } SetProperty;
+    struct
+    {
+        uintptr_t KeyProp = 0;
+        uintptr_t ValueProp = 0;
+    } MapProperty;
+    struct
+    {
+        uintptr_t MetaClass = 0;
+    } ClassProperty;
+    struct
+    {
+        uintptr_t InterfaceClass = 0;
+    } InterfaceProperty;
 
     std::string ToString() const;
 };

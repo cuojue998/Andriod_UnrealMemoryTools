@@ -58,6 +58,13 @@ namespace AutoFixVTable
     uintptr_t FindVTableCallOffset(uintptr_t functionAddress)
     {
         static std::unordered_map<uintptr_t, uintptr_t> cache;
+        static uint32_t cachedGeneration = 0;
+        const uint32_t generation = UEWrappers::GetInitGeneration();
+        if (cachedGeneration != generation)
+        {
+            cache.clear();
+            cachedGeneration = generation;
+        }
         auto it = cache.find(functionAddress);
         if (it != cache.end())
             return it->second;
@@ -169,6 +176,13 @@ namespace AutoFixVTable
     uintptr_t FindDirectBranchCallTarget(uintptr_t functionAddress)
     {
         static std::unordered_map<uintptr_t, uintptr_t> cache;
+        static uint32_t cachedGeneration = 0;
+        const uint32_t generation = UEWrappers::GetInitGeneration();
+        if (cachedGeneration != generation)
+        {
+            cache.clear();
+            cachedGeneration = generation;
+        }
         auto it = cache.find(functionAddress);
         if (it != cache.end())
             return it->second;

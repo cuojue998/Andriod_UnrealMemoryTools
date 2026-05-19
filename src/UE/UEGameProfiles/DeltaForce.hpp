@@ -131,7 +131,7 @@ public:
             offsets.FNamePool.BlocksBit = 18;
             offsets.FNamePool.BlocksOff -= sizeof(void *);
 
-            offsets.TUObjectArray.Objects = 0x10;
+            offsets.TUObjectArray.Objects = 0x20;
             offsets.TUObjectArray.NumElements = 0x4;
             offsets.TUObjectArray.NumElementsPerChunk = 0x1000;
 
@@ -215,44 +215,44 @@ public:
         {
             if (!str || !*str || len == 0) return;
 
-            uint8_t key = 0;
+            uint32_t key = 0;
             switch (len % 9)
             {
-            case 0:
-                key = ((len & 0x1F) + len + 0x80) | 0x7F;
+            case 0u:
+                key = ((len & 0x1F) + len);
                 break;
-            case 1:
-                key = ((len ^ 0xDF) + len + 0x80) | 0x7F;
+            case 1u:
+                key = ((len ^ 0xDF) + len);
                 break;
-            case 2:
-                key = ((len | 0xCF) + len + 128) | 0x7F;
+            case 2u:
+                key = ((len | 0xCF) + len);
                 break;
-            case 3:
-                key = (33 * len + 128) | 0x7F;
+            case 3u:
+                key = (33 * len);
                 break;
-            case 4:
-                key = (len + (len >> 2) + 0x80) | 0x7F;
+            case 4u:
+                key = (len + (len >> 2));
                 break;
-            case 5:
-                key = (3 * len + 133) | 0x7F;
+            case 5u:
+                key = (3 * len + 5);
                 break;
-            case 6:
-                key = (((4 * len) | 5) + len + 128) | 0x7F;
+            case 6u:
+                key = (((4 * len) | 5) + len);
                 break;
-            case 7:
-                key = (((len >> 4) | 7) + len + 128) | 0x7F;
+            case 7u:
+                key = (((len >> 4) | 7) + len);
                 break;
-            case 8:
-                key = ((len ^ 0xC) + len + 0x80) | 0x7F;
+            case 8u:
+                key = ((len ^ 0xC) + len);
                 break;
             default:
-                key = ((len ^ 0x40) + len + 128) | 0x7F;
+                key = ((len ^ 0x40) + len);
                 break;
             }
 
             for (uint32_t i = 0; i < len; i++)
             {
-                str[i] = static_cast<char>(static_cast<uint8_t>(str[i]) ^ key);
+                str[i] = (key & 0x80) ^ ~str[i];
             }
         };
 

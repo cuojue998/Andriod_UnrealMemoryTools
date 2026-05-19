@@ -1,5 +1,10 @@
 #include "UEGameProfile.hpp"
 
+#include <algorithm>
+#include <array>
+#include <initializer_list>
+#include <vector>
+
 #include "UEMemory.hpp"
 #include "UEWrappers.hpp"
 
@@ -8,6 +13,184 @@ using namespace UEMemory;
 namespace
 {
     constexpr uintptr_t kArm64PageSize = 0x1000;
+    constexpr uintptr_t kMinReadablePtr = 0x10000;
+
+    bool IsLikelyReadablePtr(uintptr_t value)
+    {
+        return value >= kMinReadablePtr && kPtrValidator.isPtrReadable(value);
+    }
+
+    bool IsLikelyObjectName(const std::string &name)
+    {
+        if (name.empty() || name.size() > 96)
+            return false;
+
+        for (char c : name)
+        {
+            const unsigned char uc = static_cast<unsigned char>(c);
+            if (!(std::isalnum(uc) || c == '_' || c == '/' || c == '.'))
+                return false;
+        }
+
+        return true;
+    }
+
+    std::vector<uintptr_t> MakeCandidateList(uintptr_t primary, std::initializer_list<uintptr_t> fallbacks)
+    {
+        std::vector<uintptr_t> result;
+        result.reserve(fallbacks.size() + 1);
+
+        auto addUnique = [&result](uintptr_t value)
+        {
+            if (std::find(result.begin(), result.end(), value) == result.end())
+                result.push_back(value);
+        };
+
+        addUnique(primary);
+        for (uintptr_t value : fallbacks)
+            addUnique(value);
+
+        return result;
+    }
+
+    int ScoreObjectArrayLayout(const std::function<std::string(int32_t)> &resolveName, uintptr_t objects, bool chunked,
+                               uintptr_t itemObjectOff, uintptr_t itemSize, const std::vector<uintptr_t> &nameOffsets)
+    {
+        if (!resolveName || !IsLikelyReadablePtr(objects) || itemSize == 0)
+            return 0;
+
+        uintptr_t entriesBase = objects;
+        if (chunked)
+        {
+            entriesBase = vm_rpm_ptr<uintptr_t>((void *)objects);
+            if (!IsLikelyReadablePtr(entriesBase))
+                return 0;
+        }
+
+        int score = 0;
+        for (int i = 0; i < 32; ++i)
+        {
+            const uintptr_t itemAddr = entriesBase + (static_cast<uintptr_t>(i) * itemSize) + itemObjectOff;
+            const uintptr_t object = vm_rpm_ptr<uintptr_t>((void *)itemAddr);
+            if (!IsLikelyReadablePtr(object))
+                continue;
+
+            score += 1;
+            for (uintptr_t nameOff : nameOffsets)
+            {
+                const int32_t nameId = vm_rpm_ptr<int32_t>((void *)(object + nameOff));
+                if (nameId <= 0 || nameId > 0x4000000)
+                    continue;
+
+                const std::string name = resolveName(nameId);
+                if (!IsLikelyObjectName(name))
+                    continue;
+
+                score += 4;
+                if (name == "/Script/CoreUObject" || name == "Package" || name == "Class" || name == "Object")
+                    score += 3;
+                break;
+            }
+
+            if (score >= 12)
+                break;
+        }
+
+        return score;
+    }
+
+    void BootstrapCoreObjectArrayOffsets(const std::function<std::string(int32_t)> &resolveName, UE_Offsets *offsets,
+                                         uintptr_t guObjectsArrayPtr)
+    {
+        if (!resolveName || !offsets || !IsLikelyReadablePtr(guObjectsArrayPtr))
+            return;
+
+        struct Candidate
+        {
+            int score = 0;
+            uintptr_t objObjectsOff = 0;
+            uintptr_t tuObjectsOff = 0;
+            uintptr_t numElementsOff = 0;
+            int32_t numElementsPerChunk = 0;
+        } best;
+
+        const auto objObjectsOffsets = MakeCandidateList(offsets->FUObjectArray.ObjObjects, {0x10, 0x18, 0x20, 0x8});
+        const auto tuObjectsOffsets = MakeCandidateList(offsets->TUObjectArray.Objects, {0x0, 0x8, 0x10, 0x18, 0x20, 0x28});
+        const auto numElementsOffsets = MakeCandidateList(offsets->TUObjectArray.NumElements, {0x4, 0x8, 0xC, 0x10, 0x14, 0x18, 0x1C, 0x20});
+        const auto nameOffsets = MakeCandidateList(offsets->UObject.NamePrivate, {0x18, 0x1C, 0x20, 0x24, 0x28});
+        const uintptr_t stableItemObjectOff = offsets->FUObjectItem.Object;
+        const uintptr_t stableItemSize = (offsets->FUObjectItem.Size >= 0x18) ? offsets->FUObjectItem.Size : 0x18;
+        const int32_t stableChunkSize = static_cast<int32_t>(offsets->TUObjectArray.NumElementsPerChunk > 0 ? offsets->TUObjectArray.NumElementsPerChunk : 0x10000);
+
+        for (uintptr_t objObjectsOff : objObjectsOffsets)
+        {
+            const uintptr_t tuObjectArray = guObjectsArrayPtr + objObjectsOff;
+            if (!IsLikelyReadablePtr(tuObjectArray))
+                continue;
+
+            for (uintptr_t tuObjectsOff : tuObjectsOffsets)
+            {
+                const uintptr_t objects = vm_rpm_ptr<uintptr_t>((void *)(tuObjectArray + tuObjectsOff));
+                if (!IsLikelyReadablePtr(objects))
+                    continue;
+
+                for (uintptr_t numElementsOff : numElementsOffsets)
+                {
+                    const int32_t numElements = vm_rpm_ptr<int32_t>((void *)(tuObjectArray + numElementsOff));
+                    if (numElements < 1024 || numElements > 5000000)
+                        continue;
+
+                    const int flatScore = ScoreObjectArrayLayout(resolveName, objects, false, stableItemObjectOff, stableItemSize, nameOffsets);
+                    const int chunkedScore = ScoreObjectArrayLayout(resolveName, objects, true, stableItemObjectOff, stableItemSize, nameOffsets);
+
+                    const bool chooseChunked = chunkedScore > flatScore;
+                    const int layoutScore = chooseChunked ? chunkedScore : flatScore;
+                    if (layoutScore <= 0)
+                        continue;
+
+                    int score = layoutScore;
+                    if (numElements > 30000)
+                        score += 2;
+                    else if (numElements > 1000)
+                        score += 1;
+
+                    if (tuObjectsOff == offsets->TUObjectArray.Objects)
+                        score += 2;
+                    if (numElementsOff == offsets->TUObjectArray.NumElements)
+                        score += 2;
+
+                    if (score <= best.score)
+                        continue;
+
+                    best.score = score;
+                    best.objObjectsOff = objObjectsOff;
+                    best.tuObjectsOff = tuObjectsOff;
+                    best.numElementsOff = numElementsOff;
+                    best.numElementsPerChunk = chooseChunked ? stableChunkSize : 0;
+                }
+            }
+        }
+
+        if (best.score <= 0)
+        {
+            LOGW("[Bootstrap] Core object array offsets not detected, fallback to preset values");
+            return;
+        }
+
+        offsets->FUObjectArray.ObjObjects = best.objObjectsOff;
+        offsets->TUObjectArray.Objects = best.tuObjectsOff;
+        offsets->TUObjectArray.NumElements = best.numElementsOff;
+        offsets->TUObjectArray.NumElementsPerChunk = best.numElementsPerChunk;
+
+        LOGI("[Bootstrap] Core object array offsets detected: ObjObjects=0x%lx TU.Objects=0x%lx TU.NumElements=0x%lx FUItem.Object=0x%lx FUItem.Size=0x%lx chunk=%d score=%d",
+             static_cast<unsigned long>(offsets->FUObjectArray.ObjObjects),
+             static_cast<unsigned long>(offsets->TUObjectArray.Objects),
+             static_cast<unsigned long>(offsets->TUObjectArray.NumElements),
+             static_cast<unsigned long>(stableItemObjectOff),
+             static_cast<unsigned long>(stableItemSize),
+             offsets->TUObjectArray.NumElementsPerChunk,
+             best.score);
+    }
 
     uint64_t DecodeADRP(uint64_t pc, uint32_t insn)
     {
@@ -222,11 +405,21 @@ UEVarsInitStatus IGameProfile::InitUEVars()
     if (!kPtrValidator.isPtrReadable(_UEVars.GUObjectsArrayPtr))
         return UEVarsInitStatus::ERROR_INIT_GUOBJECTARRAY;
 
+    BootstrapCoreObjectArrayOffsets(_UEVars.pGetNameByID, pOffsets, _UEVars.GUObjectsArrayPtr);
+
     _UEVars.ObjObjectsPtr = _UEVars.GUObjectsArrayPtr + pOffsets->FUObjectArray.ObjObjects;
 
     if (!vm_rpm_ptr((void *)(_UEVars.ObjObjectsPtr + pOffsets->TUObjectArray.Objects),
                     &_UEVars.ObjObjects_Objects, sizeof(uintptr_t)))
         return UEVarsInitStatus::ERROR_INIT_OBJOBJECTS;
+    if (!kPtrValidator.isPtrReadable(_UEVars.ObjObjects_Objects))
+        return UEVarsInitStatus::ERROR_INIT_OBJOBJECTS;
+
+    LOGI("[Bootstrap] Runtime object array: GUObject=0x%lx ObjObjects=0x%lx Objects=0x%lx",
+         static_cast<unsigned long>(_UEVars.GUObjectsArrayPtr),
+         static_cast<unsigned long>(_UEVars.ObjObjectsPtr),
+         static_cast<unsigned long>(_UEVars.ObjObjects_Objects));
+
     _UEVars.Matrix = GetMatrix();
     _UEVars.Physx = GetPhysx();
     _UEVars.FrameCount = GetFrameCount();
@@ -250,9 +443,11 @@ uint8_t *IGameProfile::GetNameEntry(int32_t id) const
     if (!IsUsingFNamePool())
     {
         static uintptr_t gNames = 0;
-        if (gNames == 0)
+        static uintptr_t gNamesPtr = 0;
+        if (gNames == 0 || gNamesPtr != namesPtr)
         {
             gNames = vm_rpm_ptr<uintptr_t>((void *)namesPtr);
+            gNamesPtr = namesPtr;
         }
 
         const int32_t ElementsPerChunk = 16384;

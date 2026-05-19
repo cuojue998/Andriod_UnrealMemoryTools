@@ -46,6 +46,9 @@ include_directories(
 link_libraries(-llog -landroid -lEGL -lGLESv3 -lvulkan -lz -ldl)
 
 add_executable(AutoUEDump ${UE_SRC} ${UE_PROFILE_SRC} ${AUTOFIX_SRC} ${GUI_SRC} src/executable.cpp src/Dumper.cpp src/UPackageGenerator.cpp src/SDKExplorer.cpp ${KITTYMEMORY_SRC} ${DEPS_PATH}/fmt/format.cc
+        src/AutoFix/NativeFunctionResolver.cpp
+        src/AutoFix/PropertyOffsetFinder.cpp
+        src/AutoFix/StructLayout.cpp
         src/Utils/BufferFmt.cpp
         src/Utils/KittyCmdln.cpp
         src/Utils/ProgressUtils.cpp)

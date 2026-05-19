@@ -39,7 +39,6 @@ std::vector<std::string> AutoFixProfile::GetAppIDs() const
 AutoFixProfile::UEFamily AutoFixProfile::ScanVersionString() const
 {
     static const char *kNeedles[] = {
-        "++UE5+Release-",
         "++UE4+Release-",
         "+Release-",
     };
@@ -56,7 +55,7 @@ AutoFixProfile::UEFamily AutoFixProfile::ScanVersionString() const
             if (minor <= 24) return UEFamily::UE4_23_24;
             return UEFamily::UE4_25_27;
         }
-        return (minor <= 2) ? UEFamily::UE5_00_02 : UEFamily::UE5_03;
+        return UEFamily::Unknown;
     };
 
     auto scanRange = [&](uintptr_t startAddr, size_t length) -> UEFamily
@@ -86,7 +85,7 @@ AutoFixProfile::UEFamily AutoFixProfile::ScanVersionString() const
                     int major = 0, minor = 0;
                     if (sscanf((const char *)(buf.data() + i + nlen), "%d.%d", &major, &minor) != 2)
                         continue;
-                    if (major != 4 && major != 5) continue;
+                    if (major != 4) continue;
                     return resolveFamily(needle, major, minor);
                 }
             }
@@ -94,7 +93,6 @@ AutoFixProfile::UEFamily AutoFixProfile::ScanVersionString() const
         return UEFamily::Unknown;
     };
 
-    // Pass 1: ELF segments of the unreal lib (fast path).
     auto ue_elf = GetUnrealELF();
     if (ue_elf.isValid())
     {
@@ -106,8 +104,6 @@ AutoFixProfile::UEFamily AutoFixProfile::ScanVersionString() const
         }
     }
 
-    // Pass 2: ALL rw-p maps in the process (BuildSettings inits the version
-    // string into a global that may live in heap/anonymous rw-p mappings).
     const auto maps = KittyMemoryEx::getAllMaps(kMgr.processID());
     for (const auto &m : maps)
     {
@@ -119,20 +115,46 @@ AutoFixProfile::UEFamily AutoFixProfile::ScanVersionString() const
     return UEFamily::Unknown;
 }
 
+AutoFixProfile::UEFamily AutoFixProfile::GuessMajorFromSoName() const
+{
+    // Epic 在 UE5 起把动态库统一改名为 libUnreal.so，UE4 时代是 libUE4.so。
+    // 直接据此映射到一个保守的 fallback 大版本即可；具体小版本由 ScanVersionString
+    // 的精确路径优先决定。
+    auto ue_elf = GetUnrealELF();
+    if (!ue_elf.isValid()) return UEFamily::Unknown;
+
+    const std::string elfPath = ue_elf.filePath();
+    if (elfPath.find("libUnreal.so") != std::string::npos)
+        return UEFamily::UE5_03;
+    if (elfPath.find("libUE4.so") != std::string::npos)
+        return UEFamily::UE4_25_27;
+    return UEFamily::Unknown;
+}
+
 void AutoFixProfile::DetectVersion() const
 {
     if (_versionDetected) return;
     _versionDetected = true;
 
-    _family = ScanVersionString();
-    if (_family == UEFamily::Unknown)
+    const UEFamily soHint = GuessMajorFromSoName();
+    if (soHint == UEFamily::UE5_03)
     {
-        LOGW("[AutoFix] UE version string not found, fallback to UE4.25-4.27");
-        _family = UEFamily::UE4_25_27;
+        _family = UEFamily::UE5_03;
+        _versionStr = "libUnreal.so (UE5)";
+        LOGI("[AutoFix] SO name suggests UE5, using UE5_03");
     }
-    else if (!_versionStr.empty())
+    else
     {
-        LOGI("[AutoFix] UE version: %s", _versionStr.c_str());
+        _family = ScanVersionString();
+        if (_family == UEFamily::Unknown)
+        {
+            LOGW("[AutoFix] UE version string not found; fallback to UE4.25-4.27");
+            _family = UEFamily::UE4_25_27;
+        }
+        else if (!_versionStr.empty())
+        {
+            LOGI("[AutoFix] UE version: %s", _versionStr.c_str());
+        }
     }
 
     switch (_family)

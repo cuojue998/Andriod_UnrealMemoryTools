@@ -31,6 +31,7 @@ private:
         int8_t NumParams = 0;
         int16_t ParamSize = 0;
         uintptr_t Func = 0;
+        uintptr_t OwnerAddress = 0;
     };
     struct Struct
     {
@@ -39,6 +40,9 @@ private:
         std::string CppName;
         uint32_t Inherited = 0;
         uint32_t Size = 0;
+        uint32_t Alignment = 1;
+        bool UseExplicitAlignment = false;
+        bool UsePack = false;
         std::vector<Member> Members;
         std::vector<Function> Functions;
     };

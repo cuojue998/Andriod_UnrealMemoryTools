@@ -57,6 +57,7 @@ private:
     void DetectVersion() const;
     void EnsureOffsetsInited() const;
     UEFamily ScanVersionString() const;
+    UEFamily GuessMajorFromSoName() const;
 
 private:
     std::string _packageHint;

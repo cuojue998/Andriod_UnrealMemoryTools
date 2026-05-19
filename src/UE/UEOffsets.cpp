@@ -135,6 +135,7 @@ std::string UE_Offsets::ToString() const
             kOUT_NS_MEMBER_P(UStruct, Children);
             kOUT_NS_MEMBER_P(UStruct, ChildProperties);
             kOUT_NS_MEMBER_P(UStruct, PropertiesSize);
+            kOUT_NS_MEMBER_P(UStruct, MinAlignment);
             kOUT_NS_END();
             kOUT_NEWLINE();
             kOUT_NEWLINE();
@@ -186,6 +187,96 @@ std::string UE_Offsets::ToString() const
             kOUT_NEWLINE();
         }
 
+        kOUT_NS_BEGIN(ObjectProperty);
+        {
+            kOUT_NS_MEMBER_P(ObjectProperty, PropertyClass);
+            kOUT_NS_END();
+            kOUT_NEWLINE();
+            kOUT_NEWLINE();
+        }
+
+        kOUT_NS_BEGIN(StructProperty);
+        {
+            kOUT_NS_MEMBER_P(StructProperty, Struct);
+            kOUT_NS_END();
+            kOUT_NEWLINE();
+            kOUT_NEWLINE();
+        }
+
+        kOUT_NS_BEGIN(ByteProperty);
+        {
+            kOUT_NS_MEMBER_P(ByteProperty, Enum);
+            kOUT_NS_END();
+            kOUT_NEWLINE();
+            kOUT_NEWLINE();
+        }
+
+        kOUT_NS_BEGIN(BoolProperty);
+        {
+            kOUT_NS_MEMBER_P(BoolProperty, Base);
+            kOUT_NS_END();
+            kOUT_NEWLINE();
+            kOUT_NEWLINE();
+        }
+
+        kOUT_NS_BEGIN(EnumProperty);
+        {
+            kOUT_NS_MEMBER_P(EnumProperty, UnderlayingProp);
+            kOUT_NS_MEMBER_P(EnumProperty, Enum);
+            kOUT_NS_END();
+            kOUT_NEWLINE();
+            kOUT_NEWLINE();
+        }
+
+        kOUT_NS_BEGIN(DelegateProperty);
+        {
+            kOUT_NS_MEMBER_P(DelegateProperty, SignatureFunction);
+            kOUT_NS_END();
+            kOUT_NEWLINE();
+            kOUT_NEWLINE();
+        }
+
+        kOUT_NS_BEGIN(ArrayProperty);
+        {
+            kOUT_NS_MEMBER_P(ArrayProperty, Inner);
+            kOUT_NS_END();
+            kOUT_NEWLINE();
+            kOUT_NEWLINE();
+        }
+
+        kOUT_NS_BEGIN(SetProperty);
+        {
+            kOUT_NS_MEMBER_P(SetProperty, ElementProp);
+            kOUT_NS_END();
+            kOUT_NEWLINE();
+            kOUT_NEWLINE();
+        }
+
+        kOUT_NS_BEGIN(MapProperty);
+        {
+            kOUT_NS_MEMBER_P(MapProperty, KeyProp);
+            kOUT_NS_MEMBER_P(MapProperty, ValueProp);
+            kOUT_NS_END();
+            kOUT_NEWLINE();
+            kOUT_NEWLINE();
+        }
+
+        kOUT_NS_BEGIN(ClassProperty);
+        {
+            kOUT_NS_MEMBER_P(ClassProperty, MetaClass);
+            kOUT_NS_END();
+            kOUT_NEWLINE();
+            kOUT_NEWLINE();
+        }
+
+        kOUT_NS_BEGIN(InterfaceProperty);
+        {
+            kOUT_NS_MEMBER_P(InterfaceProperty, InterfaceClass);
+            kOUT_NS_END();
+            kOUT_NEWLINE();
+            kOUT_NEWLINE();
+        }
+
         kOUT_NS_END();
     }
 
@@ -219,6 +310,27 @@ std::string UE_Pointers::ToString() const
 
 namespace UE_DefaultOffsets
 {
+    static void InitPropertySpecificDefaults(UE_Offsets &offsets)
+    {
+        const uintptr_t propertyTail = offsets.FProperty.Size ? offsets.FProperty.Size : offsets.UProperty.Size;
+        if (!propertyTail)
+            return;
+
+        offsets.ObjectProperty.PropertyClass = propertyTail;
+        offsets.StructProperty.Struct = propertyTail;
+        offsets.ByteProperty.Enum = propertyTail;
+        offsets.BoolProperty.Base = propertyTail;
+        offsets.EnumProperty.UnderlayingProp = propertyTail;
+        offsets.EnumProperty.Enum = propertyTail + sizeof(void *);
+        offsets.DelegateProperty.SignatureFunction = propertyTail;
+        offsets.ArrayProperty.Inner = propertyTail;
+        offsets.SetProperty.ElementProp = propertyTail;
+        offsets.MapProperty.KeyProp = propertyTail;
+        offsets.MapProperty.ValueProp = propertyTail + sizeof(void *);
+        offsets.ClassProperty.MetaClass = propertyTail + sizeof(void *);
+        offsets.InterfaceProperty.InterfaceClass = propertyTail;
+    }
+
     UE_Offsets UE4_00_17(bool bWITH_CASE_PRESERVING_NAME)
     {
         static UE_Offsets offsets{};
@@ -276,6 +388,8 @@ namespace UE_DefaultOffsets
             offsets.UProperty.PropertyFlags = GetPtrAlignedOf(offsets.UProperty.ElementSize + sizeof(int32_t));
             offsets.UProperty.Offset_Internal = offsets.UProperty.PropertyFlags + sizeof(int64_t) + (sizeof(int32_t) * 2) + offsets.FName.Size;
             offsets.UProperty.Size = GetPtrAlignedOf(offsets.UProperty.Offset_Internal + sizeof(int32_t)) + (sizeof(void *) * 4);  // sizeof(UProperty)
+
+            InitPropertySpecificDefaults(offsets);
         }
         return offsets;
     }
@@ -293,6 +407,8 @@ namespace UE_DefaultOffsets
 
             offsets.UProperty.Offset_Internal = offsets.UProperty.PropertyFlags + sizeof(int64_t) + sizeof(int32_t);
             offsets.UProperty.Size = GetPtrAlignedOf(offsets.UProperty.Offset_Internal + sizeof(int32_t) + offsets.FName.Size) + (sizeof(void *) * 4);  // sizeof(UProperty)
+
+            InitPropertySpecificDefaults(offsets);
         }
         return offsets;
     }
@@ -494,6 +610,8 @@ namespace UE_DefaultOffsets
             offsets.UProperty.PropertyFlags = 0;
             offsets.UProperty.Offset_Internal = 0;
             offsets.UProperty.Size = 0;
+
+            InitPropertySpecificDefaults(offsets);
         }
         return offsets;
     }
@@ -580,6 +698,8 @@ namespace UE_DefaultOffsets
             offsets.FProperty.PropertyFlags = GetPtrAlignedOf(offsets.FProperty.ElementSize + sizeof(int32_t));
             offsets.FProperty.Offset_Internal = offsets.FProperty.PropertyFlags + sizeof(int64_t) + sizeof(int32_t);
             offsets.FProperty.Size = GetPtrAlignedOf(offsets.FProperty.Offset_Internal + sizeof(int32_t) + offsets.FName.Size) + (sizeof(void *) * 4);  // sizeof(FProperty)
+
+            InitPropertySpecificDefaults(offsets);
         }
         return offsets;
     }
@@ -601,6 +721,8 @@ namespace UE_DefaultOffsets
             offsets.FProperty.PropertyFlags = GetPtrAlignedOf(offsets.FProperty.ElementSize + sizeof(int32_t));
             offsets.FProperty.Offset_Internal = offsets.FProperty.PropertyFlags + sizeof(int64_t) + sizeof(int32_t);
             offsets.FProperty.Size = GetPtrAlignedOf(offsets.FProperty.Offset_Internal + sizeof(int32_t) + offsets.FName.Size) + (sizeof(void *) * 4);  // sizeof(FProperty)
+
+            InitPropertySpecificDefaults(offsets);
         }
         return offsets;
     }

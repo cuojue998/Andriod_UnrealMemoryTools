@@ -96,8 +96,31 @@ namespace
     }
 }
 
-bool UEDumper::Init(IGameProfile *profile)
+bool UEDumper::Init(IGameProfile *profile, bool reuseInitializedState)
 {
+    _lastError.clear();
+    if (!profile)
+    {
+        _lastError = "ERROR_INVALID_PROFILE";
+        return false;
+    }
+
+    if (reuseInitializedState)
+    {
+        const UEVars *vars = profile->GetUEVars();
+        if (!vars || !vars->GetBaseAddress() || !vars->GetNamesPtr() ||
+            !vars->GetGUObjectsArrayPtr() || !vars->GetObjObjectsPtr() ||
+            !vars->GetObjObjects_Objects() || !vars->GetOffsets())
+        {
+            _lastError = "ERROR_REUSE_UNINITIALIZED_PROFILE";
+            return false;
+        }
+
+        _profile = profile;
+        UEWrappers::Init(vars);
+        return true;
+    }
+
     UEVarsInitStatus initStatus = profile->InitUEVars();
     if (initStatus != UEVarsInitStatus::SUCCESS)
     {

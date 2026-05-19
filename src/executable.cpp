@@ -94,6 +94,7 @@ namespace
     {
         bool valid = false;
         bool success = false;
+        pid_t pid = 0;
         std::string package;
         std::string profileName;
         bool dedicated = false;
@@ -128,6 +129,7 @@ namespace
         std::vector<StructGroup> probeStructGroups;
         std::string probedPackage;
         std::string probedProfileName;
+        pid_t probedPid = 0;
     };
 
     DumpUiState gDumpUiState;
@@ -265,6 +267,7 @@ namespace
         gDumpUiState.activePackage = candidate.package;
         gDumpUiState.probedPackage = candidate.package;
         gDumpUiState.probedProfileName = candidate.profileName;
+        gDumpUiState.probedPid = candidate.pid;
         gDumpUiState.resultPath.clear();
         gDumpUiState.lastError.clear();
         gDumpUiState.objectsPercent = 0;
@@ -272,6 +275,26 @@ namespace
         gDumpUiState.probeOffsets.clear();
         gDumpUiState.probeStructGroups.clear();
         gDumpUiState.logLines.clear();
+    }
+
+    void InvalidateProbeReuse(const std::string &reason)
+    {
+        gProbeResult = ProbeResult{};
+
+        std::lock_guard<std::mutex> lock(gDumpUiState.mutex);
+        gDumpUiState.probeFinished = false;
+        gDumpUiState.probeSuccess = false;
+        gDumpUiState.probeOffsets.clear();
+        gDumpUiState.probeStructGroups.clear();
+        gDumpUiState.probedPackage.clear();
+        gDumpUiState.probedProfileName.clear();
+        gDumpUiState.probedPid = 0;
+        gDumpUiState.dumpFinished = false;
+        gDumpUiState.dumpSuccess = false;
+        gDumpUiState.soDumpFinished = false;
+        gDumpUiState.soDumpSuccess = false;
+        if (!reason.empty())
+            gDumpUiState.logLines.push_back("I: " + reason);
     }
 
     void FinishProbeState(bool success, const std::vector<ProbeOffsetEntry> &offsets,
@@ -343,6 +366,21 @@ namespace
             PushUiLog('W', "未检测到正在运行的 Unreal Engine 进程。");
         else
             PushUiLog('I', "检测到 " + std::to_string(gCandidates.size()) + " 个 Unreal Engine 进程。");
+
+        if (gProbeResult.valid)
+        {
+            bool foundSameProcess = false;
+            for (const auto &candidate : gCandidates)
+            {
+                if (candidate.package == gProbeResult.package && candidate.pid == gProbeResult.pid)
+                {
+                    foundSameProcess = true;
+                    break;
+                }
+            }
+            if (!foundSameProcess)
+                InvalidateProbeReuse("进程列表已变化，已清除旧探针结果，请重新探测。");
+        }
     }
 
     bool SaveDumpBuffers(const std::unordered_map<std::string, BufferFmt> &dumpbuffersMap, const std::string &dumpGameDir)
@@ -595,6 +633,7 @@ namespace
         }
 
         gProbeResult = ProbeResult{};
+        gProbeResult.pid = candidate.pid;
         gProbeResult.package = candidate.package;
         gProbeResult.profileName = candidate.profileName;
         gProbeResult.dedicated = candidate.dedicated;
@@ -684,9 +723,9 @@ namespace
         FinishProbeState(true, offsets, structGroups, probeDumper.GetLastError());
     }
 
-    void ExecuteDump(const std::string package)
+    void ExecuteDump(const AutoProcessCandidate candidate)
     {
-        BeginDumpState(package);
+        BeginDumpState(candidate.package);
 
         if (!gProbeResult.valid || !gProbeResult.success || !gProbeResult.profile)
         {
@@ -694,15 +733,16 @@ namespace
             FinishDumpState(false, {}, "ERROR_NO_PROBE_RESULT");
             return;
         }
-        if (gProbeResult.package != package)
+        if (gProbeResult.package != candidate.package || gProbeResult.pid != candidate.pid)
         {
-            LOGE("探针目标 (%s) 与 Dump 目标 (%s) 不一致，请重新探测。",
-                 gProbeResult.package.c_str(), package.c_str());
+            LOGE("探针目标 (%s, pid=%d) 与 Dump 目标 (%s, pid=%d) 不一致，请重新探测。",
+                 gProbeResult.package.c_str(), gProbeResult.pid,
+                 candidate.package.c_str(), candidate.pid);
             FinishDumpState(false, {}, "ERROR_PROBE_MISMATCH");
             return;
         }
 
-        const std::string dumpGameDir = std::string(kOutputDirectory) + "/" + package;
+        const std::string dumpGameDir = std::string(kOutputDirectory) + "/" + candidate.package;
         IOUtils::delete_directory(dumpGameDir);
         if (IOUtils::mkdir_recursive(dumpGameDir, 0777) == -1)
         {
@@ -740,7 +780,8 @@ namespace
 
         SetDumpPhase("初始化 Dumper");
         LOGI("正在初始化 Dumper...");
-        if (!uEDumper.Init(gProbeResult.profile))
+        LOGI("Dump 将复用探测阶段已初始化的 Profile/Offsets。");
+        if (!uEDumper.Init(gProbeResult.profile, true))
         {
             std::string err = uEDumper.GetLastError();
             if (err.empty()) err = "ERROR_INIT_DUMPER";
@@ -787,7 +828,7 @@ namespace
         FinishDumpState(true, dumpGameDir, uEDumper.GetLastError());
     }
 
-    void ExecuteDumpUnrealLib(const std::string package)
+    void ExecuteDumpUnrealLib(const AutoProcessCandidate candidate)
     {
         {
             std::lock_guard<std::mutex> lock(gDumpUiState.mutex);
@@ -814,16 +855,17 @@ namespace
             finish(false, {});
             return;
         }
-        if (gProbeResult.package != package)
+        if (gProbeResult.package != candidate.package || gProbeResult.pid != candidate.pid)
         {
-            LOGE("探针目标 (%s) 与动态库 Dump 目标 (%s) 不一致。",
-                 gProbeResult.package.c_str(), package.c_str());
+            LOGE("探针目标 (%s, pid=%d) 与动态库 Dump 目标 (%s, pid=%d) 不一致。",
+                 gProbeResult.package.c_str(), gProbeResult.pid,
+                 candidate.package.c_str(), candidate.pid);
             finish(false, {});
             return;
         }
 
         SetDumpPhase("Dump 动态库");
-        const std::string dumpGameDir = std::string(kOutputDirectory) + "/" + package;
+        const std::string dumpGameDir = std::string(kOutputDirectory) + "/" + candidate.package;
         if (IOUtils::mkdir_recursive(dumpGameDir, 0777) == -1 && errno != EEXIST)
         {
             const int err = errno;
@@ -891,9 +933,14 @@ namespace
             PushUiLog('E', "请先成功完成探针流程，再开始 Dump。");
             return;
         }
+        if (gSelectedIndex < 0 || gSelectedIndex >= static_cast<int>(gCandidates.size()))
+        {
+            PushUiLog('E', "请先选择目标进程。");
+            return;
+        }
         if (gWorkerThread.joinable())
             gWorkerThread.join();
-        gWorkerThread = std::thread(ExecuteDump, gProbeResult.package);
+        gWorkerThread = std::thread(ExecuteDump, gCandidates[gSelectedIndex]);
     }
 
     void StartDumpUnrealLib()
@@ -903,9 +950,14 @@ namespace
             PushUiLog('E', "请先成功完成探针流程，再 Dump 动态库。");
             return;
         }
+        if (gSelectedIndex < 0 || gSelectedIndex >= static_cast<int>(gCandidates.size()))
+        {
+            PushUiLog('E', "请先选择目标进程。");
+            return;
+        }
         if (gWorkerThread.joinable())
             gWorkerThread.join();
-        gWorkerThread = std::thread(ExecuteDumpUnrealLib, gProbeResult.package);
+        gWorkerThread = std::thread(ExecuteDumpUnrealLib, gCandidates[gSelectedIndex]);
     }
 } // namespace
 
@@ -929,6 +981,7 @@ void RenderAutoUEDumpPanel(bool *main_thread_flag)
     std::string lastError;
     std::string probedPackage;
     std::string probedProfileName;
+    pid_t probedPid = 0;
     std::vector<ProbeOffsetEntry> probeOffsets;
     std::vector<StructGroup> probeStructGroups;
     std::vector<std::string> logLines;
@@ -953,6 +1006,7 @@ void RenderAutoUEDumpPanel(bool *main_thread_flag)
         lastError = gDumpUiState.lastError;
         probedPackage = gDumpUiState.probedPackage;
         probedProfileName = gDumpUiState.probedProfileName;
+        probedPid = gDumpUiState.probedPid;
         probeOffsets = gDumpUiState.probeOffsets;
         probeStructGroups = gDumpUiState.probeStructGroups;
         logLines = gDumpUiState.logLines;
@@ -966,9 +1020,11 @@ void RenderAutoUEDumpPanel(bool *main_thread_flag)
                               gSelectedIndex >= 0 &&
                               gSelectedIndex < static_cast<int>(gCandidates.size());
     const std::string selectedPackage = hasSelection ? gCandidates[gSelectedIndex].package : std::string();
+    const pid_t selectedPid = hasSelection ? gCandidates[gSelectedIndex].pid : 0;
     const bool probeMatchesSelection = probeFinished && probeSuccess &&
                                        !selectedPackage.empty() &&
-                                       selectedPackage == probedPackage;
+                                       selectedPackage == probedPackage &&
+                                       selectedPid == probedPid;
 
     // ========== 顶部信息条 ==========
     ImGui::Text("AutoUEDump  |  %s %s", Tr("版本", "Version"), kUEDUMPER_VERSION);
@@ -1110,7 +1166,17 @@ void RenderAutoUEDumpPanel(bool *main_thread_flag)
             const auto &candidate = gCandidates[i];
             std::string label = candidate.package + "  | PID " + std::to_string(candidate.pid);
             if (ImGui::Selectable(label.c_str(), gSelectedIndex == i))
+            {
+                const bool changed = gSelectedIndex != i;
                 gSelectedIndex = i;
+                if (changed && !busy &&
+                    (!gProbeResult.valid ||
+                     gProbeResult.package != candidate.package ||
+                     gProbeResult.pid != candidate.pid))
+                {
+                    InvalidateProbeReuse("已切换到新的进程实例，旧探针结果已失效，请重新探测。");
+                }
+            }
             if (ImGui::IsItemHovered())
             {
                 ImGui::BeginTooltip();
