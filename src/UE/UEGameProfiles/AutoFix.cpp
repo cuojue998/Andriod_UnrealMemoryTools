@@ -139,10 +139,10 @@ void AutoFixProfile::DetectVersion() const
     {
     case UEFamily::UE4_00_17:
     case UEFamily::UE4_18_19:
+    _useFNamePool = false; _outlineNumber = false; break;
     case UEFamily::UE4_20:
     case UEFamily::UE4_21:
     case UEFamily::UE4_22:
-        _useFNamePool = false; _outlineNumber = false; break;
     case UEFamily::UE4_23_24:
     case UEFamily::UE4_25_27:
     case UEFamily::UE5_00_02:

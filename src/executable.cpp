@@ -17,6 +17,7 @@
 #include "Utils/ProgressUtils.hpp"
 
 #include "Dumper.hpp"
+#include "SDKExplorer.hpp"
 
 #include "UE/UEMemory.hpp"
 #include "UE/UEGameProfile.hpp"
@@ -1236,6 +1237,13 @@ void RenderAutoUEDumpPanel(bool *main_thread_flag)
             if (ImGui::BeginTabItem("UClass"))             { ImGui::TextDisabled("%s", empty); ImGui::EndTabItem(); }
             if (ImGui::BeginTabItem("UFunction"))          { ImGui::TextDisabled("%s", empty); ImGui::EndTabItem(); }
             if (ImGui::BeginTabItem("FField+FProperty"))   { ImGui::TextDisabled("%s", empty); ImGui::EndTabItem(); }
+        }
+
+        if (ImGui::BeginTabItem(Tr("SDK 浏览器", "SDK Explorer")))
+        {
+            SDKExplorer::SetLanguage(gUiLang == UiLang::ZH ? 0 : 1);
+            SDKExplorer::Render();
+            ImGui::EndTabItem();
         }
 
         ImGui::EndTabBar();

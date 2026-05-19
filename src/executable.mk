@@ -14,7 +14,7 @@ LOCAL_CPPFLAGS += -fexceptions -std=c++17 -DkNO_KEYSTONE -DkEXECUTABLE
 
 LOCAL_C_INCLUDES += $(KITTYMEMORY_PATH) $(DEPS_PATH)
 
-LOCAL_SRC_FILES := executable.cpp Dumper.cpp UPackageGenerator.cpp \
+LOCAL_SRC_FILES := executable.cpp Dumper.cpp UPackageGenerator.cpp SDKExplorer.cpp \
 $(subst $(LOCAL_PATH)/,,$(wildcard $(LOCAL_PATH)/Utils/*.cpp)) \
 $(subst $(LOCAL_PATH)/,,$(wildcard $(LOCAL_PATH)/UE/*.cpp)) \
 $(subst $(LOCAL_PATH)/,,$(wildcard $(LOCAL_PATH)/UE/UEGameProfiles/*.cpp)) \

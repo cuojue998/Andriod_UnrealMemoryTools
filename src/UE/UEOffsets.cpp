@@ -1,5 +1,6 @@
 #include "UEOffsets.hpp"
 
+#include <mutex>
 #include <ostream>
 #include <sstream>
 #include <unordered_map>
@@ -306,6 +307,33 @@ namespace UE_DefaultOffsets
 
             offsets.TUObjectArray.NumElements = (sizeof(void *) * 2) + sizeof(int32_t);
             offsets.TUObjectArray.NumElementsPerChunk = 65 * 1024;
+
+            // 4.20+ 私改版本里常见 FNamePool 路径，提前装上必备的探测字段，
+            // 否则 GetNameEntryString 走 FNamePool 分支会因空 std::function 抛 bad_function_call。
+            offsets.Config.IsUsingFNamePool = true;
+            offsets.FName.Size = kGetFNameSize(bWITH_CASE_PRESERVING_NAME, false);
+
+            offsets.FNamePool.Stride = bWITH_CASE_PRESERVING_NAME ? 4 : 2;
+            offsets.FNamePool.BlocksBit = 16;
+#ifdef __APPLE__
+            offsets.FNamePool.BlocksOff = 0xD0;
+#else
+#ifdef __LP64__
+            offsets.FNamePool.BlocksOff = 0x40;
+#else
+            offsets.FNamePool.BlocksOff = 0x30;
+#endif
+#endif
+
+            offsets.FNamePoolEntry.Header = bWITH_CASE_PRESERVING_NAME ? 4 : 0;
+            offsets.FNamePoolEntry.GetIsWide = [](uint16_t header)
+            { return (header & 1) != 0; };
+            offsets.FNamePoolEntry.GetLength = [bWITH_CASE_PRESERVING_NAME](uint16_t header) -> size_t
+            {
+                return bWITH_CASE_PRESERVING_NAME ? header >> 1 : header >> 6;
+            };
+
+            offsets.FUObjectArray.ObjObjects = sizeof(int32_t) * 4;
         }
         return offsets;
     }
@@ -581,12 +609,19 @@ namespace UE_DefaultOffsets
 std::string UEVars::GetNameByID(int32_t id) const
 {
     static std::unordered_map<int32_t, std::string> namesCachedMap;
-    if (namesCachedMap.count(id) > 0)
-        return namesCachedMap[id];
+    static std::mutex namesCachedMtx;
+
+    {
+        std::lock_guard<std::mutex> lk(namesCachedMtx);
+        auto it = namesCachedMap.find(id);
+        if (it != namesCachedMap.end())
+            return it->second;
+    }
 
     std::string name = pGetNameByID ? pGetNameByID(id) : "pGetNameByID_IS_NULL";
     if (!name.empty())
     {
+        std::lock_guard<std::mutex> lk(namesCachedMtx);
         namesCachedMap[id] = name;
     }
     return name;

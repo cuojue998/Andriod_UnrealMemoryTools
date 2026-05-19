@@ -1,6 +1,7 @@
 #include "UEMemory.hpp"
 
 #include <fcntl.h>
+#include <mutex>
 
 namespace UEMemory
 {
@@ -17,25 +18,31 @@ namespace UEMemory
 
         static pid_t s_mem_pid = 0;
         static int s_mem_fd = -1;
+        static std::mutex s_mem_fd_mtx;
 
         pid_t pid = kMgr.processID();
         if (pid <= 0)
             return false;
 
-        if (s_mem_fd < 0 || s_mem_pid != pid)
+        int fd_local = -1;
         {
-            if (s_mem_fd >= 0)
-                close(s_mem_fd);
+            std::lock_guard<std::mutex> lk(s_mem_fd_mtx);
+            if (s_mem_fd < 0 || s_mem_pid != pid)
+            {
+                if (s_mem_fd >= 0)
+                    close(s_mem_fd);
 
-            std::string mem_path = "/proc/" + std::to_string(pid) + "/mem";
-            s_mem_fd = open(mem_path.c_str(), O_RDONLY);
-            if (s_mem_fd < 0)
-                return false;
+                std::string mem_path = "/proc/" + std::to_string(pid) + "/mem";
+                s_mem_fd = open(mem_path.c_str(), O_RDONLY);
+                if (s_mem_fd < 0)
+                    return false;
 
-            s_mem_pid = pid;
+                s_mem_pid = pid;
+            }
+            fd_local = s_mem_fd;
         }
 
-        ssize_t nread = pread(s_mem_fd, result, len, static_cast<off_t>(reinterpret_cast<uintptr_t>(address)));
+        ssize_t nread = pread(fd_local, result, len, static_cast<off_t>(reinterpret_cast<uintptr_t>(address)));
         return nread == static_cast<ssize_t>(len);
     }
 
