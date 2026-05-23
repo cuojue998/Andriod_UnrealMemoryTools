@@ -460,6 +460,7 @@ public:
     UE_FField GetChildProperties() const;
     UE_UField GetChildren() const;
     int32_t GetSize() const;
+    int32_t GetMinAlignment() const;
     static UE_UClass StaticClass();
 
     UE_FField FindChildProp(const std::string &name) const;
@@ -523,6 +524,7 @@ class UE_UScriptStruct : public UE_UStruct
 {
 public:
     using UE_UStruct::UE_UStruct;
+    uint32_t GetStructFlags() const;
     static UE_UClass StaticClass();
 };
 
@@ -530,6 +532,10 @@ class UE_UClass : public UE_UStruct
 {
 public:
     using UE_UStruct::UE_UStruct;
+    UE_UObject GetClassDefaultObject() const;
+    uintptr_t GetImplementedInterfacesPtr() const;
+    uint64_t GetCastFlags() const;
+    uint32_t GetClassFlags() const;
     static UE_UClass StaticClass();
 };
 
@@ -801,6 +807,9 @@ public:
         return Base(object);
     }
     std::string GetName() const;
+    UE_FName GetFName() const;
+    UE_FFieldClass GetSuperClass() const;
+    uint64_t GetCastFlags() const;
 };
 
 class UE_FField
@@ -818,6 +827,7 @@ public:
     operator bool() const { return object != nullptr; }
 
     UE_FField GetNext() const;
+    uintptr_t GetOwnerPtr() const;
     std::string GetName() const;
     UE_FFieldClass GetClass() const;
 

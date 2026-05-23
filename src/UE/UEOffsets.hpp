@@ -85,6 +85,17 @@ struct UE_Offsets
     } UStruct;
     struct
     {
+        uintptr_t ClassDefaultObject = 0;
+        uintptr_t ImplementedInterfaces = 0;
+        uintptr_t CastFlags = 0;
+        uintptr_t ClassFlags = 0;
+    } UClass;
+    struct
+    {
+        uintptr_t StructFlags = 0;
+    } UScriptStruct;
+    struct
+    {
         uintptr_t EFunctionFlags = 0;
         uintptr_t NumParams = 0;
         uintptr_t ParamSize = 0;
@@ -101,10 +112,17 @@ struct UE_Offsets
     struct
     {
         uintptr_t ClassPrivate = 0;
+        uintptr_t Owner = 0;
         uintptr_t Next = 0;
         uintptr_t NamePrivate = 0;
         uintptr_t FlagsPrivate = 0;
     } FField;
+    struct
+    {
+        uintptr_t Name = 0;
+        uintptr_t SuperClass = 0;
+        uintptr_t CastFlags = 0;
+    } FFieldClass;
     struct
     {
         uintptr_t ArrayDim = 0;
@@ -159,6 +177,14 @@ struct UE_Offsets
     {
         uintptr_t InterfaceClass = 0;
     } InterfaceProperty;
+    struct
+    {
+        uintptr_t Actors = 0;
+    } ULevel;
+    struct
+    {
+        uintptr_t RowMap = 0;
+    } UDataTable;
 
     std::string ToString() const;
 };

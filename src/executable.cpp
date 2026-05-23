@@ -529,6 +529,7 @@ namespace
             pushField(g, "Children", "UField*", off->UStruct.Children, "子字段链表");
             pushField(g, "ChildProperties", "FField*", off->UStruct.ChildProperties, "子属性链表 (UE5)");
             pushField(g, "PropertiesSize", "int32", off->UStruct.PropertiesSize, "属性总大小");
+            pushField(g, "MinAlignment", "int32", off->UStruct.MinAlignment, "最小对齐");
             groups.push_back(std::move(g));
         }
 
@@ -537,6 +538,19 @@ namespace
             StructGroup g;
             g.name = "UClass";
             pushField(g, "(继承自 UStruct)", "-", 0, "UClass 复用 UStruct 全部偏移", true);
+            pushField(g, "ClassDefaultObject", "UObject*", off->UClass.ClassDefaultObject, "类默认对象");
+            pushField(g, "ImplementedInterfaces", "TArray<FImplementedInterface>", off->UClass.ImplementedInterfaces, "接口实现列表");
+            pushField(g, "CastFlags", "uint64", off->UClass.CastFlags, "类 CastFlags");
+            pushField(g, "ClassFlags", "uint32", off->UClass.ClassFlags, "类标志");
+            groups.push_back(std::move(g));
+        }
+
+        // UScriptStruct
+        {
+            StructGroup g;
+            g.name = "UScriptStruct";
+            pushField(g, "(继承自 UStruct)", "-", 0, "UScriptStruct 复用 UStruct 布局", true);
+            pushField(g, "StructFlags", "uint32", off->UScriptStruct.StructFlags, "脚本结构标志");
             groups.push_back(std::move(g));
         }
 
@@ -556,9 +570,13 @@ namespace
             StructGroup g;
             g.name = "FField+FProperty";
             pushField(g, "FField.ClassPrivate", "FFieldClass*", off->FField.ClassPrivate, "FField 所属类");
+            pushField(g, "FField.Owner", "FFieldVariant", off->FField.Owner, "FField 所属者");
             pushField(g, "FField.Next", "FField*", off->FField.Next, "下一个 FField");
             pushField(g, "FField.NamePrivate", "FName", off->FField.NamePrivate, "FField 名称");
             pushField(g, "FField.FlagsPrivate", "EObjectFlags", off->FField.FlagsPrivate, "FField 标志");
+            pushField(g, "FFieldClass.Name", "FName", off->FFieldClass.Name, "FFieldClass 名称");
+            pushField(g, "FFieldClass.SuperClass", "FFieldClass*", off->FFieldClass.SuperClass, "FFieldClass 父类");
+            pushField(g, "FFieldClass.CastFlags", "uint64", off->FFieldClass.CastFlags, "FFieldClass CastFlags");
             pushField(g, "FProperty.ArrayDim", "int32", off->FProperty.ArrayDim, "数组维度");
             pushField(g, "FProperty.ElementSize", "int32", off->FProperty.ElementSize, "单元素大小");
             pushField(g, "FProperty.PropertyFlags", "uint64", off->FProperty.PropertyFlags, "属性标志");
@@ -586,6 +604,14 @@ namespace
             pushField(g, "FNamePool.BlocksBit", "uint32", off->FNamePool.BlocksBit, "Block 位宽");
             pushField(g, "FNamePool.BlocksOff", "uint32", off->FNamePool.BlocksOff, "Block 起始偏移");
             pushField(g, "FNamePoolEntry.Header", "uint16", off->FNamePoolEntry.Header, "PoolEntry 头");
+            groups.push_back(std::move(g));
+        }
+
+        {
+            StructGroup g;
+            g.name = "ULevel+UDataTable";
+            pushField(g, "ULevel.Actors", "TArray<AActor*>", off->ULevel.Actors, "关卡中的 Actor 列表");
+            pushField(g, "UDataTable.RowMap", "TMap<FName,uint8*>", off->UDataTable.RowMap, "数据表行映射");
             groups.push_back(std::move(g));
         }
 
@@ -1025,28 +1051,33 @@ void RenderAutoUEDumpPanel(bool *main_thread_flag)
                                        !selectedPackage.empty() &&
                                        selectedPackage == probedPackage &&
                                        selectedPid == probedPid;
+    const float lineGap = 6.0f;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f, 9.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 7.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(10.0f, 8.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 12.0f));
 
     // ========== 顶部信息条 ==========
     ImGui::Text("AutoUEDump  |  %s %s", Tr("版本", "Version"), kUEDUMPER_VERSION);
-    ImGui::SameLine();
+    ImGui::SameLine(0.0f, 12.0f);
     ImGui::TextDisabled("  %s: %s", Tr("输出", "Output"), kOutputDirectory);
-    ImGui::SameLine();
-    ImGui::Dummy(ImVec2(20.0f, 0.0f));
-    ImGui::SameLine();
+    ImGui::Dummy(ImVec2(0.0f, lineGap));
     ImGui::TextDisabled("%s:", Tr("语言", "Language"));
-    ImGui::SameLine();
+    ImGui::SameLine(0.0f, 8.0f);
     if (ImGui::SmallButton("中文")) gUiLang = UiLang::ZH;
-    ImGui::SameLine();
+    ImGui::SameLine(0.0f, 8.0f);
     if (ImGui::SmallButton("English")) gUiLang = UiLang::EN;
+    ImGui::Dummy(ImVec2(0.0f, lineGap));
     ImGui::Text("%s: 曦曦(DreamFekk) https://github.com/DreamFekk", Tr("创作者", "Author"));
     ImGui::Text("%s", Tr("禁止盗卖圈钱", "No reselling for profit"));
+    ImGui::Dummy(ImVec2(0.0f, 4.0f));
     ImGui::Separator();
+    ImGui::Dummy(ImVec2(0.0f, 4.0f));
 
     // ========== 操作工具栏 ==========
     ImGui::Text("%s", Tr("操作", "Actions"));
-    ImGui::SameLine();
-    ImGui::Dummy(ImVec2(8.0f, 0.0f));
-    ImGui::SameLine();
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
 
     if (busy)
     {
@@ -1055,28 +1086,28 @@ void RenderAutoUEDumpPanel(bool *main_thread_flag)
         if (probeRunning)        label = Tr("探针进行中...", "Probing...");
         else if (dumpRunning)    label = Tr("Dump 进行中...", "Dumping...");
         else if (soDumpRunning)  label = Tr("动态库 Dump 进行中...", "Dumping library...");
-        ImGui::Button(label);
+        ImGui::Button(label, ImVec2(180.0f, 0.0f));
         ImGui::EndDisabled();
     }
     else
     {
         const bool canProbe = hasSelection;
         if (!canProbe) ImGui::BeginDisabled();
-        if (ImGui::Button(Tr("开始探测", "Start Probe")))
+        if (ImGui::Button(Tr("开始探测", "Start Probe"), ImVec2(150.0f, 0.0f)))
             StartProbeSelected();
         if (!canProbe) ImGui::EndDisabled();
 
-        ImGui::SameLine();
+        ImGui::SameLine(0.0f, 10.0f);
         const bool canDump = probeMatchesSelection;
         if (!canDump) ImGui::BeginDisabled();
-        if (ImGui::Button(Tr("开始 Dump", "Start Dump")))
+        if (ImGui::Button(Tr("开始 Dump", "Start Dump"), ImVec2(150.0f, 0.0f)))
             StartDumpAfterProbe();
         if (!canDump) ImGui::EndDisabled();
 
-        ImGui::SameLine();
+        ImGui::SameLine(0.0f, 10.0f);
         const bool canDumpSo = probeMatchesSelection;
         if (!canDumpSo) ImGui::BeginDisabled();
-        if (ImGui::Button(Tr("Dump 动态库", "Dump Library")))
+        if (ImGui::Button(Tr("Dump 动态库", "Dump Library"), ImVec2(170.0f, 0.0f)))
             StartDumpUnrealLib();
         if (!canDumpSo) ImGui::EndDisabled();
         if (ImGui::IsItemHovered())
@@ -1090,43 +1121,44 @@ void RenderAutoUEDumpPanel(bool *main_thread_flag)
         }
     }
 
-    ImGui::SameLine();
-    if (ImGui::Button(Tr("刷新进程", "Refresh Processes")) && !busy)
+    ImGui::Dummy(ImVec2(0.0f, 8.0f));
+    if (ImGui::Button(Tr("刷新进程", "Refresh Processes"), ImVec2(150.0f, 0.0f)) && !busy)
         RefreshCandidates();
-    ImGui::SameLine();
-    if (ImGui::Button(Tr("清空日志", "Clear Logs")))
+    ImGui::SameLine(0.0f, 10.0f);
+    if (ImGui::Button(Tr("清空日志", "Clear Logs"), ImVec2(150.0f, 0.0f)))
     {
         std::lock_guard<std::mutex> lock(gDumpUiState.mutex);
         gDumpUiState.logLines.clear();
     }
-    ImGui::SameLine();
-    if (ImGui::Button(Tr("退出", "Exit")))
+    ImGui::SameLine(0.0f, 10.0f);
+    if (ImGui::Button(Tr("退出", "Exit"), ImVec2(120.0f, 0.0f)))
         *main_thread_flag = false;
 
     // 阶段 / 状态行
+    ImGui::Dummy(ImVec2(0.0f, 8.0f));
     ImGui::Text("%s: %s", Tr("阶段", "Phase"), phase.c_str());
     if (!activePackage.empty())
     {
-        ImGui::SameLine();
+        ImGui::SameLine(0.0f, 10.0f);
         ImGui::TextDisabled(" |  %s: %s", Tr("目标", "Target"), activePackage.c_str());
     }
     if (probeFinished)
     {
-        ImGui::SameLine();
+        ImGui::SameLine(0.0f, 10.0f);
         ImVec4 c = probeSuccess ? ImVec4(0.35f, 0.95f, 0.35f, 1.0f) : ImVec4(1.0f, 0.35f, 0.35f, 1.0f);
         ImGui::TextColored(c, probeSuccess ? Tr(" | 探针 OK", " | Probe OK")
                                            : Tr(" | 探针失败", " | Probe failed"));
     }
     if (dumpFinished)
     {
-        ImGui::SameLine();
+        ImGui::SameLine(0.0f, 10.0f);
         ImVec4 c = dumpSuccess ? ImVec4(0.35f, 0.95f, 0.35f, 1.0f) : ImVec4(1.0f, 0.35f, 0.35f, 1.0f);
         ImGui::TextColored(c, dumpSuccess ? Tr(" | Dump OK", " | Dump OK")
                                           : Tr(" | Dump 失败", " | Dump failed"));
     }
     if (soDumpFinished)
     {
-        ImGui::SameLine();
+        ImGui::SameLine(0.0f, 10.0f);
         ImVec4 c = soDumpSuccess ? ImVec4(0.35f, 0.95f, 0.35f, 1.0f) : ImVec4(1.0f, 0.35f, 0.35f, 1.0f);
         ImGui::TextColored(c, soDumpSuccess ? Tr(" | 动态库 OK", " | Lib OK")
                                             : Tr(" | 动态库失败", " | Lib failed"));
@@ -1140,32 +1172,38 @@ void RenderAutoUEDumpPanel(bool *main_thread_flag)
 
     if (objectsPercent > 0)
     {
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
         std::string label = std::string(Tr("对象扫描", "Objects scan")) + " " + std::to_string(objectsPercent) + "%";
         ImGui::ProgressBar(objectsPercent / 100.0f, ImVec2(-1.0f, 0.0f), label.c_str());
     }
     if (dumpPercent > 0)
     {
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
         std::string label = std::string(Tr("Dump 进度", "Dump progress")) + " " + std::to_string(dumpPercent) + "%";
         ImGui::ProgressBar(dumpPercent / 100.0f, ImVec2(-1.0f, 0.0f), label.c_str());
     }
 
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
     ImGui::Separator();
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
 
     // ========== 主体: 左侧进程列表 + 右侧标签页 ==========
-    const float bottomReserved = 240.0f;
+    const float bottomReserved = 280.0f;
     ImGui::BeginChild("##main_split", ImVec2(0.0f, -bottomReserved), false);
 
     // ---- 左侧: 进程列表 ----
-    ImGui::BeginChild("##process_pane", ImVec2(360.0f, 0.0f), true);
+    ImGui::BeginChild("##process_pane", ImVec2(400.0f, 0.0f), true);
     ImGui::Text("%s", Tr("进程列表", "Process List"));
+    ImGui::Dummy(ImVec2(0.0f, 4.0f));
     ImGui::Separator();
+    ImGui::Dummy(ImVec2(0.0f, 4.0f));
     if (ImGui::BeginListBox("##processes", ImVec2(-1.0f, -1.0f)))
     {
         for (int i = 0; i < static_cast<int>(gCandidates.size()); ++i)
         {
             const auto &candidate = gCandidates[i];
             std::string label = candidate.package + "  | PID " + std::to_string(candidate.pid);
-            if (ImGui::Selectable(label.c_str(), gSelectedIndex == i))
+            if (ImGui::Selectable(label.c_str(), gSelectedIndex == i, 0, ImVec2(0.0f, ImGui::GetTextLineHeightWithSpacing() + 6.0f)))
             {
                 const bool changed = gSelectedIndex != i;
                 gSelectedIndex = i;
@@ -1193,7 +1231,7 @@ void RenderAutoUEDumpPanel(bool *main_thread_flag)
     }
     ImGui::EndChild();
 
-    ImGui::SameLine();
+    ImGui::SameLine(0.0f, 12.0f);
 
     // ---- 右侧: 标签页 ----
     ImGui::BeginChild("##tab_pane", ImVec2(0.0f, 0.0f), true);
@@ -1220,7 +1258,9 @@ void RenderAutoUEDumpPanel(bool *main_thread_flag)
                     Tr("当前没有找到正在运行的 Unreal Engine 进程，请点击\"刷新进程\"。",
                        "No running Unreal Engine process found. Click \"Refresh Processes\"."));
             }
+            ImGui::Dummy(ImVec2(0.0f, 4.0f));
             ImGui::Separator();
+            ImGui::Dummy(ImVec2(0.0f, 4.0f));
             if (probeFinished && probeSuccess)
             {
                 ImGui::TextWrapped("%s: %s", Tr("已探测", "Probed"), probedPackage.c_str());
@@ -1255,11 +1295,14 @@ void RenderAutoUEDumpPanel(bool *main_thread_flag)
                 ImGui::TextDisabled("%s",
                     Tr("自动修补结果 (绿色=已识别, 红色=未识别)",
                        "Auto-fix result (green = identified, red = unknown)"));
+                ImGui::Dummy(ImVec2(0.0f, 6.0f));
+                ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(10.0f, 8.0f));
                 ImGuiTableFlags flags = ImGuiTableFlags_Borders |
                                         ImGuiTableFlags_RowBg |
                                         ImGuiTableFlags_Resizable |
                                         ImGuiTableFlags_ScrollY |
-                                        ImGuiTableFlags_SizingStretchProp;
+                                        ImGuiTableFlags_SizingStretchProp |
+                                        ImGuiTableFlags_PadOuterX;
                 if (ImGui::BeginTable("##fields", 5, flags, ImVec2(0.0f, 0.0f)))
                 {
                     ImGui::TableSetupScrollFreeze(0, 1);
@@ -1291,6 +1334,7 @@ void RenderAutoUEDumpPanel(bool *main_thread_flag)
                     }
                     ImGui::EndTable();
                 }
+                ImGui::PopStyleVar();
                 ImGui::EndTabItem();
             }
         }
@@ -1320,6 +1364,7 @@ void RenderAutoUEDumpPanel(bool *main_thread_flag)
 
     // ========== 底部: 运行日志 ==========
     ImGui::Separator();
+    ImGui::Dummy(ImVec2(0.0f, 4.0f));
     ImGui::Text("%s", Tr("运行日志", "Logs"));
     if (ImGui::BeginChild("##logs", ImVec2(0.0f, 0.0f), true, ImGuiWindowFlags_HorizontalScrollbar))
     {
@@ -1330,6 +1375,8 @@ void RenderAutoUEDumpPanel(bool *main_thread_flag)
             ImGui::SetScrollHereY(1.0f);
     }
     ImGui::EndChild();
+
+    ImGui::PopStyleVar(4);
 }
 
 

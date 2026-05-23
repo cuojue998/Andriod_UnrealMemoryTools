@@ -46,8 +46,8 @@ public:
     {
         PATTERN_MAP_TYPE map_type = isEmulator() ? PATTERN_MAP_TYPE::ANY_R : PATTERN_MAP_TYPE::ANY_X;
 
-        std::string ida_pattern = "C0 03 5F D6 ? ? ? ? 08 ? ? ? 00 01 40 F9 C0 03 5F D6 FD 7B BF A9";
-        const int step = 4;
+        std::string ida_pattern = "? ? ? F0 ? ? ? F9 ? ? ? F9 C0 03 5F D6 ? ? ? A9 FD 03 00 91 ? ? ? D0";
+        const int step = 0;
         auto FrameOff = Arm64::Decode_ADRP_LDR(findIdaPattern(map_type, ida_pattern, step));
         if (FrameOff !=0)
             return vm_rpm_ptr<uintptr_t>((void*)FrameOff);

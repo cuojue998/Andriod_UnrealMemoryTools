@@ -7,6 +7,7 @@
 
 #include "SDKExplorer.hpp"
 
+#include "AutoFix/StructLayout.hpp"
 #include "UE/UEMemory.hpp"
 #include "UE/UEWrappers.hpp"
 
@@ -318,6 +319,7 @@ namespace SDKExplorer
             if (!arr) { ImGui::TextDisabled("no array"); return; }
             int32_t total = GetTotal();
             int pageSize = gPageSize <= 0 ? 100 : gPageSize;
+            const float lineHeight = ImGui::GetTextLineHeightWithSpacing() + 4.0f;
 
             // 仅"全部"模式下使用分页；搜索模式下不分页，按需扫描前 N 条命中
             bool searching = gSearchMode && gSearchBuf[0] != '\0';
@@ -326,8 +328,8 @@ namespace SDKExplorer
             if (gPage < 0) gPage = 0;
 
             ImGui::Text("Total: %d  Page: %d/%d", total, gPage + 1, totalPages);
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(80.0f);
+            ImGui::SameLine(0.0f, 12.0f);
+            ImGui::SetNextItemWidth(110.0f);
             ImGui::InputInt("PageSize", &gPageSize, 0, 0);
             if (gPageSize < 10) gPageSize = 10;
             if (gPageSize > 1000) gPageSize = 1000;
@@ -335,7 +337,7 @@ namespace SDKExplorer
             // 搜索状态/进度
             if (searching)
             {
-                ImGui::SameLine();
+                ImGui::Dummy(ImVec2(0.0f, 4.0f));
                 if (gScanning)
                 {
                     float pct = gScanTotal > 0 ? (float)gScanCursor / (float)gScanTotal : 0.0f;
@@ -355,7 +357,8 @@ namespace SDKExplorer
                 }
             }
 
-            ImGui::SetNextItemWidth(260.0f);
+            ImGui::Dummy(ImVec2(0.0f, 6.0f));
+            ImGui::SetNextItemWidth(320.0f);
             if (ImGui::InputText("##search", gSearchBuf, sizeof(gSearchBuf),
                                  ImGuiInputTextFlags_EnterReturnsTrue))
             {
@@ -363,20 +366,20 @@ namespace SDKExplorer
                 gPage = 0;
                 gNeedRebuildSearch = true;
             }
-            ImGui::SameLine();
+            ImGui::SameLine(0.0f, 10.0f);
             if (ImGui::SmallButton(Tr("键盘##obj_search_kb", "KB##obj_search_kb")))
             {
                 OpenKeyboard(gSearchBuf, sizeof(gSearchBuf),
                              Tr("对象搜索 - 虚拟键盘", "Object Search Keyboard"), 1);
             }
-            ImGui::SameLine();
+            ImGui::SameLine(0.0f, 8.0f);
             if (ImGui::SmallButton(Tr("搜索", "Search")))
             {
                 gSearchMode = true;
                 gPage = 0;
                 gNeedRebuildSearch = true;
             }
-            ImGui::SameLine();
+            ImGui::SameLine(0.0f, 8.0f);
             if (ImGui::SmallButton(Tr("全部", "All")))
             {
                 gSearchMode = false;
@@ -395,15 +398,17 @@ namespace SDKExplorer
                 if (gPage < 0) gPage = 0;
             }
 
+            ImGui::Dummy(ImVec2(0.0f, 6.0f));
             if (ImGui::SmallButton("<<")) gPage = 0;
-            ImGui::SameLine();
+            ImGui::SameLine(0.0f, 8.0f);
             if (ImGui::SmallButton("<") && gPage > 0) --gPage;
-            ImGui::SameLine();
+            ImGui::SameLine(0.0f, 8.0f);
             int maxPage = searching ? searchPages - 1 : totalPages - 1;
             if (ImGui::SmallButton(">") && gPage < maxPage) ++gPage;
-            ImGui::SameLine();
+            ImGui::SameLine(0.0f, 8.0f);
             if (ImGui::SmallButton(">>")) gPage = maxPage;
 
+            ImGui::Dummy(ImVec2(0.0f, 8.0f));
             if (ImGui::BeginChild("##objlist", ImVec2(0.0f, 0.0f), true))
             {
                 if (!searching)
@@ -421,7 +426,7 @@ namespace SDKExplorer
                         std::snprintf(head, sizeof(head), "[%d] ", row);
                         bool sel = (gSelectedObj == p);
                         std::string line = head + name;
-                        if (ImGui::Selectable(line.c_str(), sel))
+                        if (ImGui::Selectable(line.c_str(), sel, 0, ImVec2(0.0f, lineHeight)))
                             SelectObject(p);
                     }
                 }
@@ -441,7 +446,7 @@ namespace SDKExplorer
                         std::snprintf(head, sizeof(head), "[%d] ", row);
                         bool sel = (gSelectedObj == p);
                         std::string line = head + name;
-                        if (ImGui::Selectable(line.c_str(), sel))
+                        if (ImGui::Selectable(line.c_str(), sel, 0, ImVec2(0.0f, lineHeight)))
                             SelectObject(p);
                     }
                 }
@@ -465,9 +470,11 @@ namespace SDKExplorer
             auto *off = UEWrappers::GetOffsets();
             uint8_t *fnameAddr = gSelectedObj + off->UObject.NamePrivate;
 
+            ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(10.0f, 8.0f));
             if (ImGui::BeginTable("##props", 2,
                                   ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
-                                      ImGuiTableFlags_SizingStretchProp))
+                                      ImGuiTableFlags_SizingStretchProp |
+                                      ImGuiTableFlags_PadOuterX))
             {
                 ImGui::TableSetupColumn(Tr("字段", "Field"));
                 ImGui::TableSetupColumn(Tr("值", "Value"));
@@ -506,7 +513,11 @@ namespace SDKExplorer
 
                 ImGui::EndTable();
             }
+            ImGui::PopStyleVar();
         }
+
+        std::string FormatHexQword(uintptr_t v);
+        std::string BuildFunctionSignature(const UE_UFunction &fn);
 
         // ----- Functions (UClass child UFunctions) ----------------------------
         void RenderFunctionsList()
@@ -524,17 +535,23 @@ namespace SDKExplorer
                 return;
             }
             ImGui::Text("%s: %s", Tr("类", "Class"), s.GetCppName().c_str());
+            ImGui::Dummy(ImVec2(0.0f, 6.0f));
 
-            if (ImGui::BeginTable("##fns", 4,
+            ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(10.0f, 8.0f));
+            if (ImGui::BeginTable("##fns", 7,
                                   ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
                                       ImGuiTableFlags_ScrollY |
-                                      ImGuiTableFlags_SizingStretchProp,
+                                      ImGuiTableFlags_SizingStretchProp |
+                                      ImGuiTableFlags_PadOuterX,
                                   ImVec2(0, 0)))
             {
-                ImGui::TableSetupColumn(Tr("签名", "Signature"), ImGuiTableColumnFlags_WidthStretch, 3.5f);
-                ImGui::TableSetupColumn(Tr("Flags", "Flags"), ImGuiTableColumnFlags_WidthStretch, 2.0f);
-                ImGui::TableSetupColumn("Func", ImGuiTableColumnFlags_WidthStretch, 1.4f);
-                ImGui::TableSetupColumn(Tr("所属", "Class"), ImGuiTableColumnFlags_WidthStretch, 1.6f);
+                ImGui::TableSetupColumn(Tr("签名", "Signature"), ImGuiTableColumnFlags_WidthStretch, 4.2f);
+                ImGui::TableSetupColumn(Tr("Flags", "Flags"), ImGuiTableColumnFlags_WidthStretch, 2.1f);
+                ImGui::TableSetupColumn("Num", ImGuiTableColumnFlags_WidthStretch, 0.6f);
+                ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthStretch, 0.7f);
+                ImGui::TableSetupColumn("Func", ImGuiTableColumnFlags_WidthStretch, 1.5f);
+                ImGui::TableSetupColumn("RVA", ImGuiTableColumnFlags_WidthStretch, 1.4f);
+                ImGui::TableSetupColumn(Tr("所属", "Owner"), ImGuiTableColumnFlags_WidthStretch, 1.6f);
                 ImGui::TableHeadersRow();
 
                 int rows = 0;
@@ -542,19 +559,33 @@ namespace SDKExplorer
                 {
                     if (!child.IsA<UE_UFunction>()) continue;
                     auto fn = child.Cast<UE_UFunction>();
+                    const uintptr_t func = fn.GetFunc();
+                    const uintptr_t base = UEWrappers::GetBaseAddress();
+                    const std::string signature = BuildFunctionSignature(fn);
                     ImGui::TableNextRow();
                     ImGui::TableSetColumnIndex(0);
-                    ImGui::TextUnformatted(fn.GetName().c_str());
+                    if (ImGui::Selectable(signature.c_str(), false, ImGuiSelectableFlags_SpanAllColumns))
+                        SelectObject(fn.GetAddress());
                     ImGui::TableSetColumnIndex(1);
                     ImGui::TextUnformatted(fn.GetFunctionFlags().c_str());
                     ImGui::TableSetColumnIndex(2);
-                    ImGui::Text("0x%llx", (unsigned long long)fn.GetFunc());
+                    ImGui::Text("%d", (int)fn.GetNumParams());
                     ImGui::TableSetColumnIndex(3);
+                    ImGui::Text("0x%X", (unsigned)(uint16_t)fn.GetParamSize());
+                    ImGui::TableSetColumnIndex(4);
+                    ImGui::TextUnformatted(FormatHexQword(func).c_str());
+                    ImGui::TableSetColumnIndex(5);
+                    if (base && func >= base)
+                        ImGui::Text("0x%llX", (unsigned long long)(func - base));
+                    else
+                        ImGui::TextUnformatted("-");
+                    ImGui::TableSetColumnIndex(6);
                     ImGui::TextUnformatted(s.GetName().c_str());
                     if (++rows > 1024) break;
                 }
                 ImGui::EndTable();
             }
+            ImGui::PopStyleVar();
         }
         // ----- Inspector value reader ------------------------------------
         std::string FormatHexQword(uintptr_t v)
@@ -723,18 +754,366 @@ namespace SDKExplorer
             }
         }
 
+        const FieldRow *FindFieldRow(const std::vector<FieldRow> &rows, std::initializer_list<const char *> names)
+        {
+            for (const FieldRow &row : rows)
+            {
+                for (const char *name : names)
+                {
+                    if (name && row.name == name)
+                        return &row;
+                }
+            }
+            return nullptr;
+        }
+
+        int CountChildProperties(const UE_UStruct &s)
+        {
+            int count = 0;
+            for (auto prop = s.GetChildProperties(); prop && count < 4096; prop = prop.GetNext())
+                ++count;
+            return count;
+        }
+
+        int CountChildren(const UE_UStruct &s)
+        {
+            int count = 0;
+            for (auto child = s.GetChildren(); child && count < 4096; child = child.GetNext())
+                ++count;
+            return count;
+        }
+
+        std::string FormatHexQword(uintptr_t v);
+
+        std::string FormatHexU32(uint32_t v)
+        {
+            char buf[24];
+            std::snprintf(buf, sizeof(buf), "0x%X", v);
+            return buf;
+        }
+
+        std::string BuildPropertyDecl(const std::string &type, const std::string &name, uint64_t flags)
+        {
+            std::string decl = type.empty() ? "void" : type;
+            if ((flags & CPF_ConstParm) && decl.rfind("const ", 0) != 0)
+                decl = "const " + decl;
+            if ((flags & CPF_OutParm) || (flags & CPF_ReferenceParm))
+                decl += "&";
+            if (!name.empty())
+                decl += " " + name;
+            return decl;
+        }
+
+        std::string BuildFunctionSignature(const UE_UFunction &fn)
+        {
+            std::vector<std::string> params;
+            std::string retType = "void";
+
+            if (fn.GetChildProperties())
+            {
+                for (auto prop = fn.GetChildProperties().Cast<UE_FProperty>(); prop; prop = prop.GetNext().Cast<UE_FProperty>())
+                {
+                    const uint64_t flags = prop.GetPropertyFlags();
+                    if (!(flags & CPF_Parm))
+                        continue;
+                    auto typeInfo = prop.GetType();
+                    if (flags & CPF_ReturnParm)
+                    {
+                        retType = typeInfo.second.empty() ? "void" : typeInfo.second;
+                        continue;
+                    }
+                    params.push_back(BuildPropertyDecl(typeInfo.second, prop.GetName(), flags));
+                }
+            }
+            else
+            {
+                for (auto child = fn.GetChildren(); child; child = child.GetNext())
+                {
+                    if (!child.IsA<UE_UProperty>())
+                        continue;
+                    auto prop = child.Cast<UE_UProperty>();
+                    const uint64_t flags = prop.GetPropertyFlags();
+                    if (!(flags & CPF_Parm))
+                        continue;
+                    auto typeInfo = prop.GetType();
+                    if (flags & CPF_ReturnParm)
+                    {
+                        retType = typeInfo.second.empty() ? "void" : typeInfo.second;
+                        continue;
+                    }
+                    params.push_back(BuildPropertyDecl(typeInfo.second, prop.GetName(), flags));
+                }
+            }
+
+            std::string sig = retType + " " + fn.GetName() + "(";
+            for (size_t i = 0; i < params.size(); ++i)
+            {
+                if (i)
+                    sig += ", ";
+                sig += params[i];
+            }
+            sig += ")";
+            return sig;
+        }
+
+        std::string FormatMaybeRva(uintptr_t address)
+        {
+            const uintptr_t base = UEWrappers::GetBaseAddress();
+            if (!address)
+                return "0";
+            if (base && address >= base)
+            {
+                char buf[64];
+                std::snprintf(buf, sizeof(buf), "0x%llX (+0x%llX)",
+                              (unsigned long long)address,
+                              (unsigned long long)(address - base));
+                return buf;
+            }
+            return FormatHexQword(address);
+        }
+
+        void RenderActorPreview(uint8_t *levelObj)
+        {
+            auto *off = UEWrappers::GetOffsets();
+            if (!levelObj || !off || !off->ULevel.Actors)
+            {
+                ImGui::TextDisabled("%s", Tr("Actors 偏移未就绪", "Actors offset unavailable"));
+                return;
+            }
+
+            TArray<uint8_t *> actors = UEMemory::vm_rpm_ptr<TArray<uint8_t *>>(levelObj + off->ULevel.Actors);
+            ImGui::Text("%s: %d / %d", Tr("Actor 数量", "Actor count"), actors.Num(), actors.Max());
+            if (actors.Num() <= 0 || !actors.GetData())
+                return;
+
+            const int previewCount = std::min<int>(actors.Num(), std::max(1, std::min(gContainerMaxRows, 32)));
+            ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(10.0f, 8.0f));
+            if (ImGui::BeginTable("##runtime_actors", 3,
+                                  ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                                      ImGuiTableFlags_SizingStretchProp |
+                                      ImGuiTableFlags_PadOuterX,
+                                  ImVec2(0, 180.0f)))
+            {
+                ImGui::TableSetupColumn("Index", ImGuiTableColumnFlags_WidthFixed, 52.0f);
+                ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthStretch, 1.1f);
+                ImGui::TableSetupColumn(Tr("名称", "Name"), ImGuiTableColumnFlags_WidthStretch, 2.0f);
+                ImGui::TableHeadersRow();
+
+                for (int i = 0; i < previewCount; ++i)
+                {
+                    uint8_t *actorPtr = UEMemory::vm_rpm_ptr<uint8_t *>(actors.GetData() + i);
+                    UE_UObject actor(actorPtr);
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0); ImGui::Text("%d", i);
+                    ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(FormatHexQword((uintptr_t)actorPtr).c_str());
+                    ImGui::TableSetColumnIndex(2);
+                    const std::string actorName = actor ? actor.GetFullName() : "nullptr";
+                    if (ImGui::Selectable(actorName.c_str(), false, ImGuiSelectableFlags_SpanAllColumns))
+                    {
+                        if (actorPtr)
+                            SelectObject(actorPtr);
+                    }
+                }
+                ImGui::EndTable();
+            }
+            ImGui::PopStyleVar();
+        }
+
+        void RenderMetadataPanel()
+        {
+            if (!gSelectedObj)
+            {
+                ImGui::TextDisabled("%s", Tr("未选中对象", "No object selected"));
+                return;
+            }
+
+            UE_UObject obj(gSelectedObj);
+            UE_UClass cls = obj.GetClass();
+            UE_UStruct targetStruct = obj.IsA<UE_UStruct>() ? obj.Cast<UE_UStruct>() : cls.Cast<UE_UStruct>();
+            const auto &layoutInfo = targetStruct ? AutoFixStructLayout::GetStructLayoutInfo(targetStruct) : AutoFixStructLayout::StructLayoutInfo{};
+
+            ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(10.0f, 8.0f));
+            if (ImGui::BeginTable("##meta", 2,
+                                  ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                                      ImGuiTableFlags_SizingStretchProp |
+                                      ImGuiTableFlags_PadOuterX))
+            {
+                ImGui::TableSetupColumn(Tr("字段", "Field"));
+                ImGui::TableSetupColumn(Tr("值", "Value"));
+                ImGui::TableHeadersRow();
+
+                auto row = [&](const char *k, const std::string &v)
+                {
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(k);
+                    ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(v.c_str());
+                };
+
+                row(Tr("对象", "Object"), obj.GetFullName());
+                row(Tr("包", "Package"), obj.GetPackageObject() ? obj.GetPackageObject().GetName() : "None");
+                row(Tr("类", "Class"), cls ? cls.GetFullName() : "None");
+
+                if (targetStruct)
+                {
+                    row(Tr("结构", "Struct"), targetStruct.GetFullName());
+                    row(Tr("父类/父结构", "Super"), targetStruct.GetSuper() ? targetStruct.GetSuper().GetFullName() : "None");
+                    row(Tr("大小", "Size"), FormatHexU32(targetStruct.GetSize()));
+                    row(Tr("对齐", "Alignment"), FormatHexU32(targetStruct.GetMinAlignment()));
+                    row(Tr("ChildProperties", "ChildProperties"), std::to_string(CountChildProperties(targetStruct)));
+                    row(Tr("Children", "Children"), std::to_string(CountChildren(targetStruct)));
+                    if (layoutInfo.Size > 0)
+                    {
+                        row(Tr("布局显示大小", "Display Size"), FormatHexU32(layoutInfo.Size));
+                        row(Tr("布局对齐", "Layout Align"), FormatHexU32(layoutInfo.Alignment));
+                    }
+                }
+
+                if (obj.IsA<UE_UClass>())
+                {
+                    auto c = obj.Cast<UE_UClass>();
+                    row("ClassDefaultObject", c.GetClassDefaultObject() ? c.GetClassDefaultObject().GetFullName() : "None");
+                    row("ImplementedInterfaces", FormatHexQword(c.GetImplementedInterfacesPtr()));
+                    row("CastFlags", FormatHexQword((uintptr_t)c.GetCastFlags()));
+                    row("ClassFlags", FormatHexU32(c.GetClassFlags()));
+                }
+                else if (cls)
+                {
+                    row(Tr("运行时类 CDO", "Runtime CDO"), cls.GetClassDefaultObject() ? cls.GetClassDefaultObject().GetFullName() : "None");
+                    row(Tr("运行时类 CastFlags", "Runtime CastFlags"), FormatHexQword((uintptr_t)cls.GetCastFlags()));
+                    row(Tr("运行时类 ClassFlags", "Runtime ClassFlags"), FormatHexU32(cls.GetClassFlags()));
+                }
+
+                if (obj.IsA<UE_UScriptStruct>())
+                {
+                    auto ss = obj.Cast<UE_UScriptStruct>();
+                    row("StructFlags", FormatHexU32(ss.GetStructFlags()));
+                }
+
+                if (obj.IsA<UE_UFunction>())
+                {
+                    auto fn = obj.Cast<UE_UFunction>();
+                    row(Tr("函数签名", "Signature"), BuildFunctionSignature(fn));
+                    row("NumParams", std::to_string(fn.GetNumParams()));
+                    row("ParamSize", FormatHexU32((uint32_t)(uint16_t)fn.GetParamSize()));
+                    row("Func", FormatMaybeRva(fn.GetFunc()));
+                    row("Flags", fn.GetFunctionFlags());
+                }
+
+                ImGui::EndTable();
+            }
+            ImGui::PopStyleVar();
+        }
+
+        void RenderRuntimePanel()
+        {
+            if (!gSelectedObj)
+            {
+                ImGui::TextDisabled("%s", Tr("未选中对象", "No object selected"));
+                return;
+            }
+
+            UE_UObject obj(gSelectedObj);
+            UE_UClass cls = obj.GetClass();
+            if (!cls)
+            {
+                ImGui::TextDisabled("%s", Tr("无效对象", "Invalid object"));
+                return;
+            }
+
+            std::vector<FieldRow> rows;
+            CollectFields(cls.Cast<UE_UStruct>(), rows);
+
+            const UE_UClass worldClass = UEWrappers::GetObjects()->FindObject<UE_UClass>("Class Engine.World");
+            const UE_UClass levelClass = UEWrappers::GetObjects()->FindObject<UE_UClass>("Class Engine.Level");
+            const UE_UClass dataTableClass = UEWrappers::GetObjects()->FindObject<UE_UClass>("Class Engine.DataTable");
+
+            if (worldClass && obj.IsA(worldClass))
+            {
+                ImGui::TextUnformatted("UWorld");
+                const FieldRow *persistentLevel = FindFieldRow(rows, {"PersistentLevel"});
+                const FieldRow *owningGameInstance = FindFieldRow(rows, {"OwningGameInstance"});
+                const FieldRow *netDriver = FindFieldRow(rows, {"NetDriver", "DemoNetDriver"});
+
+                auto showObjectField = [&](const char *label, const FieldRow *field) -> uint8_t *
+                {
+                    if (!field)
+                    {
+                        ImGui::Text("%s: <missing>", label);
+                        return nullptr;
+                    }
+                    uint8_t *ptr = UEMemory::vm_rpm_ptr<uint8_t *>(gSelectedObj + field->offset);
+                    UE_UObject target(ptr);
+                    ImGui::Text("%s: %s", label, target ? target.GetFullName().c_str() : "nullptr");
+                    return ptr;
+                };
+
+                uint8_t *levelPtr = showObjectField("PersistentLevel", persistentLevel);
+                showObjectField("OwningGameInstance", owningGameInstance);
+                showObjectField("NetDriver", netDriver);
+                if (levelPtr)
+                {
+                    ImGui::Separator();
+                    RenderActorPreview(levelPtr);
+                }
+                return;
+            }
+
+            if (levelClass && obj.IsA(levelClass))
+            {
+                ImGui::TextUnformatted("ULevel");
+                RenderActorPreview(gSelectedObj);
+                return;
+            }
+
+            if (dataTableClass && obj.IsA(dataTableClass))
+            {
+                auto *off = UEWrappers::GetOffsets();
+                ImGui::TextUnformatted("UDataTable");
+                const FieldRow *rowStructField = FindFieldRow(rows, {"RowStruct"});
+                if (rowStructField)
+                {
+                    uint8_t *rowStructPtr = UEMemory::vm_rpm_ptr<uint8_t *>(gSelectedObj + rowStructField->offset);
+                    UE_UObject rowStruct(rowStructPtr);
+                    ImGui::Text("RowStruct: %s", rowStruct ? rowStruct.GetFullName().c_str() : "nullptr");
+                }
+                else
+                {
+                    ImGui::TextDisabled("%s", Tr("未找到 RowStruct 字段", "RowStruct field not found"));
+                }
+
+                if (off && off->UDataTable.RowMap)
+                {
+                    const uintptr_t base = reinterpret_cast<uintptr_t>(gSelectedObj) + off->UDataTable.RowMap;
+                    const uintptr_t dataPtr = UEMemory::vm_rpm_ptr<uintptr_t>((void *)base);
+                    const int32_t count = UEMemory::vm_rpm_ptr<int32_t>((void *)(base + sizeof(void *)));
+                    const int32_t maxCount = UEMemory::vm_rpm_ptr<int32_t>((void *)(base + sizeof(void *) + sizeof(int32_t)));
+                    ImGui::Text("RowMap: Data=%s Count=%d Max=%d",
+                                FormatHexQword(dataPtr).c_str(),
+                                count,
+                                maxCount);
+                }
+                else
+                {
+                    ImGui::TextDisabled("%s", Tr("RowMap 偏移未就绪", "RowMap offset unavailable"));
+                }
+                return;
+            }
+
+            ImGui::TextDisabled("%s", Tr("当前对象没有专用运行时视图", "No dedicated runtime view for current object"));
+        }
+
         // ----- Object Inspector ------------------------------------------
         void RenderInspectorPanel()
         {
-            ImGui::SetNextItemWidth(220.0f);
+            ImGui::SetNextItemWidth(260.0f);
             ImGui::InputText("##inspaddr", gInspectAddrBuf, sizeof(gInspectAddrBuf));
-            ImGui::SameLine();
+            ImGui::SameLine(0.0f, 10.0f);
             if (ImGui::SmallButton(Tr("键盘##inspect_kb", "KB##inspect_kb")))
             {
                 OpenKeyboard(gInspectAddrBuf, sizeof(gInspectAddrBuf),
                              Tr("地址输入 - 虚拟键盘", "Address Input Keyboard"), 2);
             }
-            ImGui::SameLine();
+            ImGui::SameLine(0.0f, 8.0f);
             if (ImGui::SmallButton("Inspect"))
             {
                 gInspectError.clear();
@@ -752,13 +1131,13 @@ namespace SDKExplorer
                     gSelectedFullName = o.GetFullName();
                 }
             }
-            ImGui::SameLine();
+            ImGui::SameLine(0.0f, 8.0f);
             if (ImGui::SmallButton("Add Tag") && gInspectObj)
             {
                 UE_UObject o(gInspectObj);
                 gTags.push_back({o.GetFullName(), gInspectObj});
             }
-            ImGui::SameLine();
+            ImGui::SameLine(0.0f, 8.0f);
             if (ImGui::SmallButton("Back") && !gBackStack.empty())
             {
                 gInspectObj = gBackStack.back();
@@ -811,14 +1190,17 @@ namespace SDKExplorer
             ImGui::Text("%s: %s", Tr("类", "Class"), cls.GetCppName().c_str());
             ImGui::Text("%s: %s", Tr("全名", "FullName"),
                         gSelectedFullName.c_str());
+            ImGui::Dummy(ImVec2(0.0f, 6.0f));
 
             std::vector<FieldRow> rows;
             CollectFields(cls.Cast<UE_UStruct>(), rows);
 
+            ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(10.0f, 8.0f));
             if (ImGui::BeginTable("##insp", 5,
                                   ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
                                       ImGuiTableFlags_ScrollY |
-                                      ImGuiTableFlags_SizingStretchProp))
+                                      ImGuiTableFlags_SizingStretchProp |
+                                      ImGuiTableFlags_PadOuterX))
             {
                 ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthStretch, 2.4f);
                 ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 2.0f);
@@ -857,6 +1239,7 @@ namespace SDKExplorer
                 }
                 ImGui::EndTable();
             }
+            ImGui::PopStyleVar();
         }
 
         // ----- Container View --------------------------------------------
@@ -878,15 +1261,18 @@ namespace SDKExplorer
             std::vector<FieldRow> rows;
             CollectFields(cls.Cast<UE_UStruct>(), rows);
 
-            ImGui::SetNextItemWidth(120.0f);
+            ImGui::SetNextItemWidth(140.0f);
             ImGui::InputInt("MaxRows", &gContainerMaxRows, 0, 0);
             if (gContainerMaxRows < 1) gContainerMaxRows = 1;
             if (gContainerMaxRows > 4096) gContainerMaxRows = 4096;
 
+            ImGui::Dummy(ImVec2(0.0f, 6.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(10.0f, 8.0f));
             if (ImGui::BeginTable("##ctn", 6,
                                   ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
                                       ImGuiTableFlags_ScrollY |
-                                      ImGuiTableFlags_SizingStretchProp))
+                                      ImGuiTableFlags_SizingStretchProp |
+                                      ImGuiTableFlags_PadOuterX))
             {
                 ImGui::TableSetupColumn("Index");
                 ImGui::TableSetupColumn("Offset");
@@ -982,6 +1368,7 @@ namespace SDKExplorer
                 }
                 ImGui::EndTable();
             }
+            ImGui::PopStyleVar();
         }
 
     }  // namespace
@@ -1001,20 +1388,37 @@ namespace SDKExplorer
         RefreshIfNeeded();
 
         ImVec2 avail = ImGui::GetContentRegionAvail();
-        float leftW = avail.x * 0.42f;
+        float leftW = avail.x * 0.44f;
+
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f, 9.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 6.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(10.0f, 8.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 12.0f));
 
         ImGui::BeginChild("##sdkx_left", ImVec2(leftW, 0), true);
         ImGui::Text("%s", Tr("对象浏览器", "Object Browser"));
         ImGui::Separator();
-        if (ImGui::BeginChild("##sdkx_left_top", ImVec2(0, avail.y * 0.55f), false))
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
+        if (ImGui::BeginChild("##sdkx_left_top", ImVec2(0, avail.y * 0.52f), false))
             RenderObjectBrowser();
         ImGui::EndChild();
         ImGui::Separator();
+        ImGui::Dummy(ImVec2(0.0f, 2.0f));
         if (ImGui::BeginTabBar("##sdkx_left_tabs"))
         {
+            if (ImGui::BeginTabItem(Tr("元数据", "Metadata")))
+            {
+                RenderMetadataPanel();
+                ImGui::EndTabItem();
+            }
             if (ImGui::BeginTabItem(Tr("容器视图", "Container View")))
             {
                 RenderContainerView();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem(Tr("运行时", "Runtime")))
+            {
+                RenderRuntimePanel();
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem(Tr("属性", "Properties")))
@@ -1026,22 +1430,26 @@ namespace SDKExplorer
         }
         ImGui::EndChild();
 
-        ImGui::SameLine();
+        ImGui::SameLine(0.0f, 12.0f);
 
         ImGui::BeginChild("##sdkx_right", ImVec2(0, 0), true);
-        if (ImGui::BeginChild("##sdkx_right_top", ImVec2(0, avail.y * 0.6f), false))
+        if (ImGui::BeginChild("##sdkx_right_top", ImVec2(0, avail.y * 0.58f), false))
         {
             ImGui::Text("%s", Tr("对象成员视图", "Object Inspector"));
             ImGui::Separator();
+            ImGui::Dummy(ImVec2(0.0f, 4.0f));
             RenderInspectorPanel();
         }
         ImGui::EndChild();
         ImGui::Separator();
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
         ImGui::Text("%s", Tr("函数列表", "Functions"));
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
         RenderFunctionsList();
         ImGui::EndChild();
+
+        ImGui::PopStyleVar(4);
 
         RenderVirtualKeyboard();
     }
 }  // namespace SDKExplorer
-

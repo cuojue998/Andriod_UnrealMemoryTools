@@ -526,6 +526,12 @@ int32_t UE_UStruct::GetSize() const
     return vm_rpm_ptr<int32_t>(object + UEWrappers::GetOffsets()->UStruct.PropertiesSize);
 }
 
+int32_t UE_UStruct::GetMinAlignment() const
+{
+    const uintptr_t offset = UEWrappers::GetOffsets()->UStruct.MinAlignment;
+    return offset ? vm_rpm_ptr<int32_t>(object + offset) : 0;
+}
+
 UE_UClass UE_UStruct::StaticClass()
 {
     static UE_UClass obj;
@@ -731,9 +737,39 @@ UE_UClass UE_UScriptStruct::StaticClass()
     UE_STATIC_CLASS_CACHED("Class CoreUObject.ScriptStruct");
 }
 
+uint32_t UE_UScriptStruct::GetStructFlags() const
+{
+    const uintptr_t offset = UEWrappers::GetOffsets()->UScriptStruct.StructFlags;
+    return offset ? vm_rpm_ptr<uint32_t>(object + offset) : 0;
+}
+
 UE_UClass UE_UClass::StaticClass()
 {
     UE_STATIC_CLASS_CACHED("Class CoreUObject.Class");
+}
+
+UE_UObject UE_UClass::GetClassDefaultObject() const
+{
+    const uintptr_t offset = UEWrappers::GetOffsets()->UClass.ClassDefaultObject;
+    return offset ? vm_rpm_ptr<UE_UObject>(object + offset) : UE_UObject();
+}
+
+uintptr_t UE_UClass::GetImplementedInterfacesPtr() const
+{
+    const uintptr_t offset = UEWrappers::GetOffsets()->UClass.ImplementedInterfaces;
+    return offset ? vm_rpm_ptr<uintptr_t>(object + offset) : 0;
+}
+
+uint64_t UE_UClass::GetCastFlags() const
+{
+    const uintptr_t offset = UEWrappers::GetOffsets()->UClass.CastFlags;
+    return offset ? vm_rpm_ptr<uint64_t>(object + offset) : 0;
+}
+
+uint32_t UE_UClass::GetClassFlags() const
+{
+    const uintptr_t offset = UEWrappers::GetOffsets()->UClass.ClassFlags;
+    return offset ? vm_rpm_ptr<uint32_t>(object + offset) : 0;
 }
 
 TArray<uint8_t> UE_UEnum::GetNames() const
@@ -1085,13 +1121,38 @@ UE_UClass UE_ULazyObjectProperty::StaticClass()
 
 std::string UE_FFieldClass::GetName() const
 {
-    auto name = UE_FName(object);
+    const uintptr_t offset = UEWrappers::GetOffsets()->FFieldClass.Name;
+    auto name = UE_FName(object + offset);
     return name.GetName();
+}
+
+UE_FName UE_FFieldClass::GetFName() const
+{
+    const uintptr_t offset = UEWrappers::GetOffsets()->FFieldClass.Name;
+    return UE_FName(object + offset);
+}
+
+UE_FFieldClass UE_FFieldClass::GetSuperClass() const
+{
+    const uintptr_t offset = UEWrappers::GetOffsets()->FFieldClass.SuperClass;
+    return offset ? vm_rpm_ptr<UE_FFieldClass>(object + offset) : UE_FFieldClass();
+}
+
+uint64_t UE_FFieldClass::GetCastFlags() const
+{
+    const uintptr_t offset = UEWrappers::GetOffsets()->FFieldClass.CastFlags;
+    return offset ? vm_rpm_ptr<uint64_t>(object + offset) : 0;
 }
 
 UE_FField UE_FField::GetNext() const
 {
     return vm_rpm_ptr<UE_FField>(object + UEWrappers::GetOffsets()->FField.Next);
+}
+
+uintptr_t UE_FField::GetOwnerPtr() const
+{
+    const uintptr_t offset = UEWrappers::GetOffsets()->FField.Owner;
+    return offset ? vm_rpm_ptr<uintptr_t>(object + offset) : 0;
 }
 
 std::string UE_FField::GetName() const
