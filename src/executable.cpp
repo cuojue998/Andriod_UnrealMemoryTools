@@ -1038,6 +1038,20 @@ void RenderAutoUEDumpPanel(bool *main_thread_flag)
         logLines = gDumpUiState.logLines;
     }
 
+    enum NavPage
+    {
+        NavOverview = 0,
+        NavProcess,
+        NavStructs,
+        NavExplorer,
+        NavLogs,
+        NavSettings
+    };
+
+    static int navPage = NavOverview;
+    static int selectedStructIndex = 0;
+    static int themeIndex = 1;
+
     const bool busy = probeRunning || dumpRunning || soDumpRunning;
     if (!busy && gWorkerThread.joinable())
         gWorkerThread.join();
@@ -1051,332 +1065,694 @@ void RenderAutoUEDumpPanel(bool *main_thread_flag)
                                        !selectedPackage.empty() &&
                                        selectedPackage == probedPackage &&
                                        selectedPid == probedPid;
-    const float lineGap = 6.0f;
+    const bool hasData = probeFinished && probeSuccess && !probeStructGroups.empty();
+    if (!hasData)
+        selectedStructIndex = 0;
+    else if (selectedStructIndex >= static_cast<int>(probeStructGroups.size()))
+        selectedStructIndex = static_cast<int>(probeStructGroups.size()) - 1;
 
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f, 9.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 7.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(10.0f, 8.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 12.0f));
-
-    // ========== 顶部信息条 ==========
-    ImGui::Text("UnrealMemoryTools  |  %s %s", Tr("版本", "Version"), kUEDUMPER_VERSION);
-    ImGui::SameLine(0.0f, 12.0f);
-    ImGui::TextDisabled("  %s: %s", Tr("输出", "Output"), kOutputDirectory);
-    ImGui::Dummy(ImVec2(0.0f, lineGap));
-    ImGui::TextDisabled("%s:", Tr("语言", "Language"));
-    ImGui::SameLine(0.0f, 8.0f);
-    if (ImGui::SmallButton("中文")) gUiLang = UiLang::ZH;
-    ImGui::SameLine(0.0f, 8.0f);
-    if (ImGui::SmallButton("English")) gUiLang = UiLang::EN;
-    ImGui::Dummy(ImVec2(0.0f, lineGap));
-    ImGui::Text("%s: 曦曦(DreamFekk) https://github.com/DreamFekk", Tr("创作者", "Author"));
-    ImGui::Text("%s", Tr("禁止盗卖圈钱", "No reselling for profit"));
-    ImGui::Dummy(ImVec2(0.0f, 4.0f));
-    ImGui::Separator();
-    ImGui::Dummy(ImVec2(0.0f, 4.0f));
-
-    // ========== 操作工具栏 ==========
-    ImGui::Text("%s", Tr("操作", "Actions"));
-    ImGui::Dummy(ImVec2(0.0f, 6.0f));
-
-    if (busy)
+    auto applyTheme = [](int idx)
     {
-        ImGui::BeginDisabled();
-        const char *label = Tr("进行中...", "Working...");
-        if (probeRunning)        label = Tr("探针进行中...", "Probing...");
-        else if (dumpRunning)    label = Tr("Dump 进行中...", "Dumping...");
-        else if (soDumpRunning)  label = Tr("动态库 Dump 进行中...", "Dumping library...");
-        ImGui::Button(label, ImVec2(180.0f, 0.0f));
-        ImGui::EndDisabled();
-    }
-    else
-    {
-        const bool canProbe = hasSelection;
-        if (!canProbe) ImGui::BeginDisabled();
-        if (ImGui::Button(Tr("开始探测", "Start Probe"), ImVec2(150.0f, 0.0f)))
-            StartProbeSelected();
-        if (!canProbe) ImGui::EndDisabled();
-
-        ImGui::SameLine(0.0f, 10.0f);
-        const bool canDump = probeMatchesSelection;
-        if (!canDump) ImGui::BeginDisabled();
-        if (ImGui::Button(Tr("开始 Dump", "Start Dump"), ImVec2(150.0f, 0.0f)))
-            StartDumpAfterProbe();
-        if (!canDump) ImGui::EndDisabled();
-
-        ImGui::SameLine(0.0f, 10.0f);
-        const bool canDumpSo = probeMatchesSelection;
-        if (!canDumpSo) ImGui::BeginDisabled();
-        if (ImGui::Button(Tr("Dump 动态库", "Dump Library"), ImVec2(170.0f, 0.0f)))
-            StartDumpUnrealLib();
-        if (!canDumpSo) ImGui::EndDisabled();
-        if (ImGui::IsItemHovered())
+        switch (idx)
         {
-            ImGui::BeginTooltip();
-            ImGui::Text("%s", Tr("从内存转储 libUE4.so / libUnreal.so",
-                                  "Dump libUE4.so / libUnreal.so from memory"));
-            ImGui::TextDisabled("%s: %s/<package>/<lib*.so>",
-                                Tr("输出", "Output"), kOutputDirectory);
-            ImGui::EndTooltip();
+            case 0: ImGui::StyleColorsLight(); break;
+            case 2: ImGui::StyleColorsClassic(); break;
+            default: ImGui::StyleColorsDark(); break;
         }
-    }
+    };
 
-    ImGui::Dummy(ImVec2(0.0f, 8.0f));
-    if (ImGui::Button(Tr("刷新进程", "Refresh Processes"), ImVec2(150.0f, 0.0f)) && !busy)
-        RefreshCandidates();
-    ImGui::SameLine(0.0f, 10.0f);
-    if (ImGui::Button(Tr("清空日志", "Clear Logs"), ImVec2(150.0f, 0.0f)))
+    auto drawNavButton = [](const char *label, bool active) -> bool
     {
-        std::lock_guard<std::mutex> lock(gDumpUiState.mutex);
-        gDumpUiState.logLines.clear();
-    }
-    ImGui::SameLine(0.0f, 10.0f);
-    if (ImGui::Button(Tr("退出", "Exit"), ImVec2(120.0f, 0.0f)))
-        *main_thread_flag = false;
+        ImGui::PushStyleColor(ImGuiCol_Button,
+                              active ? ImVec4(0.23f, 0.40f, 0.70f, 0.95f)
+                                     : ImVec4(0.11f, 0.14f, 0.20f, 0.90f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                              active ? ImVec4(0.27f, 0.47f, 0.82f, 1.0f)
+                                     : ImVec4(0.18f, 0.24f, 0.35f, 0.95f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,
+                              active ? ImVec4(0.20f, 0.36f, 0.63f, 1.0f)
+                                     : ImVec4(0.16f, 0.22f, 0.31f, 1.0f));
+        const bool clicked = ImGui::Button(label, ImVec2(-1.0f, 42.0f));
+        ImGui::PopStyleColor(3);
+        return clicked;
+    };
 
-    // 阶段 / 状态行
-    ImGui::Dummy(ImVec2(0.0f, 8.0f));
-    ImGui::Text("%s: %s", Tr("阶段", "Phase"), phase.c_str());
-    if (!activePackage.empty())
+    auto drawStatusChip = [](const char *label, const ImVec4 &color)
     {
-        ImGui::SameLine(0.0f, 10.0f);
-        ImGui::TextDisabled(" |  %s: %s", Tr("目标", "Target"), activePackage.c_str());
-    }
-    if (probeFinished)
-    {
-        ImGui::SameLine(0.0f, 10.0f);
-        ImVec4 c = probeSuccess ? ImVec4(0.35f, 0.95f, 0.35f, 1.0f) : ImVec4(1.0f, 0.35f, 0.35f, 1.0f);
-        ImGui::TextColored(c, probeSuccess ? Tr(" | 探针 OK", " | Probe OK")
-                                           : Tr(" | 探针失败", " | Probe failed"));
-    }
-    if (dumpFinished)
-    {
-        ImGui::SameLine(0.0f, 10.0f);
-        ImVec4 c = dumpSuccess ? ImVec4(0.35f, 0.95f, 0.35f, 1.0f) : ImVec4(1.0f, 0.35f, 0.35f, 1.0f);
-        ImGui::TextColored(c, dumpSuccess ? Tr(" | Dump OK", " | Dump OK")
-                                          : Tr(" | Dump 失败", " | Dump failed"));
-    }
-    if (soDumpFinished)
-    {
-        ImGui::SameLine(0.0f, 10.0f);
-        ImVec4 c = soDumpSuccess ? ImVec4(0.35f, 0.95f, 0.35f, 1.0f) : ImVec4(1.0f, 0.35f, 0.35f, 1.0f);
-        ImGui::TextColored(c, soDumpSuccess ? Tr(" | 动态库 OK", " | Lib OK")
-                                            : Tr(" | 动态库失败", " | Lib failed"));
-    }
-    if (!resultPath.empty() && dumpSuccess)
-        ImGui::TextWrapped("%s: %s", Tr("结果路径", "Output Path"), resultPath.c_str());
-    if (!soDumpPath.empty() && soDumpSuccess)
-        ImGui::TextWrapped("%s: %s", Tr("动态库", "Library"), soDumpPath.c_str());
-    if (!lastError.empty())
-        ImGui::TextWrapped("%s: %s", Tr("状态信息", "Status"), lastError.c_str());
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 12.0f);
+        ImGui::PushStyleColor(ImGuiCol_Button, color);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, color);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, color);
+        ImGui::Button(label);
+        ImGui::PopStyleColor(3);
+        ImGui::PopStyleVar();
+    };
 
-    if (objectsPercent > 0)
+    auto drawSectionHeader = [](const char *title, const char *subtitle)
     {
+        ImGui::Text("%s", title);
+        if (subtitle && *subtitle)
+            ImGui::TextDisabled("%s", subtitle);
+        ImGui::Dummy(ImVec2(0.0f, 2.0f));
+        ImGui::Separator();
         ImGui::Dummy(ImVec2(0.0f, 4.0f));
-        std::string label = std::string(Tr("对象扫描", "Objects scan")) + " " + std::to_string(objectsPercent) + "%";
-        ImGui::ProgressBar(objectsPercent / 100.0f, ImVec2(-1.0f, 0.0f), label.c_str());
-    }
-    if (dumpPercent > 0)
+    };
+
+    auto drawActionButtons = [&]()
     {
-        ImGui::Dummy(ImVec2(0.0f, 4.0f));
-        std::string label = std::string(Tr("Dump 进度", "Dump progress")) + " " + std::to_string(dumpPercent) + "%";
-        ImGui::ProgressBar(dumpPercent / 100.0f, ImVec2(-1.0f, 0.0f), label.c_str());
-    }
-
-    ImGui::Dummy(ImVec2(0.0f, 6.0f));
-    ImGui::Separator();
-    ImGui::Dummy(ImVec2(0.0f, 6.0f));
-
-    // ========== 主体: 左侧进程列表 + 右侧标签页 ==========
-    const float bottomReserved = 280.0f;
-    ImGui::BeginChild("##main_split", ImVec2(0.0f, -bottomReserved), false);
-
-    // ---- 左侧: 进程列表 ----
-    ImGui::BeginChild("##process_pane", ImVec2(400.0f, 0.0f), true);
-    ImGui::Text("%s", Tr("进程列表", "Process List"));
-    ImGui::Dummy(ImVec2(0.0f, 4.0f));
-    ImGui::Separator();
-    ImGui::Dummy(ImVec2(0.0f, 4.0f));
-    if (ImGui::BeginListBox("##processes", ImVec2(-1.0f, -1.0f)))
-    {
-        for (int i = 0; i < static_cast<int>(gCandidates.size()); ++i)
+        if (busy)
         {
-            const auto &candidate = gCandidates[i];
-            std::string label = candidate.package + "  | PID " + std::to_string(candidate.pid);
-            if (ImGui::Selectable(label.c_str(), gSelectedIndex == i, 0, ImVec2(0.0f, ImGui::GetTextLineHeightWithSpacing() + 6.0f)))
-            {
-                const bool changed = gSelectedIndex != i;
-                gSelectedIndex = i;
-                if (changed && !busy &&
-                    (!gProbeResult.valid ||
-                     gProbeResult.package != candidate.package ||
-                     gProbeResult.pid != candidate.pid))
-                {
-                    InvalidateProbeReuse("已切换到新的进程实例，旧探针结果已失效，请重新探测。");
-                }
-            }
+            ImGui::BeginDisabled();
+            const char *label = Tr("进行中...", "Working...");
+            if (probeRunning)        label = Tr("探针进行中...", "Probing...");
+            else if (dumpRunning)    label = Tr("Dump 进行中...", "Dumping...");
+            else if (soDumpRunning)  label = Tr("动态库 Dump 进行中...", "Dumping library...");
+            ImGui::Button(label, ImVec2(-1.0f, 42.0f));
+            ImGui::EndDisabled();
+        }
+        else
+        {
+            const bool canProbe = hasSelection;
+            if (!canProbe) ImGui::BeginDisabled();
+            if (ImGui::Button(Tr("开始探测", "Start Probe"), ImVec2(-1.0f, 42.0f)))
+                StartProbeSelected();
+            if (!canProbe) ImGui::EndDisabled();
+
+            const bool canDump = probeMatchesSelection;
+            if (!canDump) ImGui::BeginDisabled();
+            if (ImGui::Button(Tr("开始 Dump", "Start Dump"), ImVec2(-1.0f, 42.0f)))
+                StartDumpAfterProbe();
+            if (!canDump) ImGui::EndDisabled();
+
+            const bool canDumpSo = probeMatchesSelection;
+            if (!canDumpSo) ImGui::BeginDisabled();
+            if (ImGui::Button(Tr("Dump 动态库", "Dump Library"), ImVec2(-1.0f, 42.0f)))
+                StartDumpUnrealLib();
+            if (!canDumpSo) ImGui::EndDisabled();
             if (ImGui::IsItemHovered())
             {
                 ImGui::BeginTooltip();
-                ImGui::Text("%s: %s", Tr("包名", "Package"), candidate.package.c_str());
-                ImGui::Text("PID:  %d", candidate.pid);
-                ImGui::Text("Profile: %s", candidate.profileName.c_str());
-                ImGui::Text("%s: %s", Tr("模式", "Mode"),
-                            candidate.dedicated ? Tr("专用", "Dedicated")
-                                                : Tr("自动", "Auto"));
+                ImGui::Text("%s", Tr("从内存转储 libUE4.so / libUnreal.so",
+                                      "Dump libUE4.so / libUnreal.so from memory"));
+                ImGui::TextDisabled("%s: %s/<package>/<lib*.so>",
+                                    Tr("输出", "Output"), kOutputDirectory);
                 ImGui::EndTooltip();
             }
         }
-        ImGui::EndListBox();
-    }
-    ImGui::EndChild();
+    };
 
-    ImGui::SameLine(0.0f, 12.0f);
-
-    // ---- 右侧: 标签页 ----
-    ImGui::BeginChild("##tab_pane", ImVec2(0.0f, 0.0f), true);
-    if (ImGui::BeginTabBar("##ue_tabs", ImGuiTabBarFlags_Reorderable))
+    auto drawProcessListPane = [&](const char *childId, const char *title, const char *subtitle)
     {
-        const bool hasData = probeFinished && probeSuccess && !probeStructGroups.empty();
-
-        // 摘要标签
-        if (ImGui::BeginTabItem(Tr("摘要", "Summary")))
+        ImGui::PushID(childId);
+        ImGui::BeginChild("##panel", ImVec2(0.0f, 0.0f), true);
+        drawSectionHeader(title, subtitle);
+        if (ImGui::Button(Tr("刷新进程", "Refresh Processes"), ImVec2(-1.0f, 40.0f)) && !busy)
+            RefreshCandidates();
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
+        if (ImGui::BeginChild("##process_list_card", ImVec2(0.0f, 0.0f), false))
         {
-            if (hasSelection)
+            for (int i = 0; i < static_cast<int>(gCandidates.size()); ++i)
             {
-                const auto &candidate = gCandidates[gSelectedIndex];
-                ImGui::Text("%s: %s", Tr("已选包名", "Selected"), candidate.package.c_str());
-                ImGui::Text("PID:      %d", candidate.pid);
-                ImGui::TextWrapped("Profile: %s", candidate.profileName.c_str());
-                ImGui::Text("%s:     %s", Tr("模式", "Mode"),
-                            candidate.dedicated ? Tr("专用", "Dedicated")
-                                                : Tr("自动", "Auto"));
+                const auto &candidate = gCandidates[i];
+                std::string label = candidate.package + "\nPID " + std::to_string(candidate.pid) +
+                                    "  |  " + candidate.profileName;
+                if (ImGui::Selectable(label.c_str(), gSelectedIndex == i, 0, ImVec2(0.0f, 52.0f)))
+                {
+                    const bool changed = gSelectedIndex != i;
+                    gSelectedIndex = i;
+                    if (changed && !busy &&
+                        (!gProbeResult.valid ||
+                         gProbeResult.package != candidate.package ||
+                         gProbeResult.pid != candidate.pid))
+                    {
+                        InvalidateProbeReuse("已切换到新的进程实例，旧探针结果已失效，请重新探测。");
+                    }
+                }
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::BeginTooltip();
+                    ImGui::Text("%s: %s", Tr("包名", "Package"), candidate.package.c_str());
+                    ImGui::Text("PID: %d", candidate.pid);
+                    ImGui::Text("Profile: %s", candidate.profileName.c_str());
+                    ImGui::Text("%s: %s", Tr("模式", "Mode"),
+                                candidate.dedicated ? Tr("专用", "Dedicated")
+                                                    : Tr("自动", "Auto"));
+                    ImGui::EndTooltip();
+                }
             }
-            else
-            {
-                ImGui::TextWrapped("%s",
-                    Tr("当前没有找到正在运行的 Unreal Engine 进程，请点击\"刷新进程\"。",
-                       "No running Unreal Engine process found. Click \"Refresh Processes\"."));
-            }
-            ImGui::Dummy(ImVec2(0.0f, 4.0f));
-            ImGui::Separator();
-            ImGui::Dummy(ImVec2(0.0f, 4.0f));
-            if (probeFinished && probeSuccess)
-            {
-                ImGui::TextWrapped("%s: %s", Tr("已探测", "Probed"), probedPackage.c_str());
-                ImGui::TextWrapped("Profile: %s", probedProfileName.c_str());
-                ImGui::TextDisabled("%s",
-                    Tr("提示: 切换其它进程后需重新点击\"开始探测\"。",
-                       "Tip: After switching processes, click \"Start Probe\" again."));
-            }
-            else if (probeFinished)
-            {
-                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s",
-                    Tr("探针失败，请检查日志或重新探测。",
-                       "Probe failed. Check the logs or try again."));
-            }
-            else
+            if (gCandidates.empty())
             {
                 ImGui::TextWrapped("%s",
-                    Tr("尚未探测，请选择进程后点击 \"开始探测\"。",
-                       "Not probed yet. Select a process and click \"Start Probe\"."));
+                    Tr("当前没有找到正在运行的 Unreal Engine 进程，请点击上方按钮刷新。",
+                       "No running Unreal Engine process was found. Click the button above to refresh."));
             }
-            ImGui::EndTabItem();
+        }
+        ImGui::EndChild();
+        ImGui::EndChild();
+        ImGui::PopID();
+    };
+
+    auto drawProbeSummaryPane = [&](const char *title, const char *subtitle, bool withJumpToStructs)
+    {
+        ImGui::PushID(title);
+        ImGui::BeginChild("##panel", ImVec2(0.0f, 0.0f), true);
+        drawSectionHeader(title, subtitle);
+        if (probeFinished && probeSuccess)
+        {
+            ImGui::TextWrapped("%s: %s", Tr("已探测目标", "Probed"), probedPackage.c_str());
+            ImGui::TextWrapped("Profile: %s", probedProfileName.c_str());
+            ImGui::Text("PID: %d", probedPid);
+            ImGui::Dummy(ImVec2(0.0f, 8.0f));
+
+            if (!probeOffsets.empty() &&
+                ImGui::BeginTable("##probe_offsets", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+            {
+                ImGui::TableSetupColumn(Tr("名称", "Name"), ImGuiTableColumnFlags_WidthStretch, 1.3f);
+                ImGui::TableSetupColumn(Tr("偏移", "Offset"), ImGuiTableColumnFlags_WidthStretch, 1.0f);
+                ImGui::TableSetupColumn(Tr("状态", "State"), ImGuiTableColumnFlags_WidthStretch, 0.8f);
+                ImGui::TableHeadersRow();
+                for (const auto &entry : probeOffsets)
+                {
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::TextUnformatted(entry.name.c_str());
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::Text("0x%lX", static_cast<unsigned long>(entry.relative));
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::TextColored(entry.found ? ImVec4(0.36f, 0.92f, 0.45f, 1.0f)
+                                                   : ImVec4(1.0f, 0.43f, 0.43f, 1.0f),
+                                       "%s", entry.found ? Tr("已识别", "OK") : Tr("缺失", "Missing"));
+                }
+                ImGui::EndTable();
+            }
+
+            if (!probeStructGroups.empty())
+            {
+                ImGui::Dummy(ImVec2(0.0f, 8.0f));
+                ImGui::Text("%s", Tr("结构摘要", "Struct Summary"));
+                ImGui::Dummy(ImVec2(0.0f, 2.0f));
+                for (int i = 0; i < static_cast<int>(probeStructGroups.size()) && i < 8; ++i)
+                {
+                    const auto &group = probeStructGroups[i];
+                    std::string summary = group.name + "  |  " +
+                                          std::to_string(group.fields.size()) + Tr(" 字段", " fields");
+                    if (ImGui::Selectable(summary.c_str(), selectedStructIndex == i))
+                    {
+                        selectedStructIndex = i;
+                        if (withJumpToStructs)
+                            navPage = NavStructs;
+                    }
+                }
+            }
+        }
+        else if (probeFinished)
+        {
+            ImGui::TextColored(ImVec4(1.0f, 0.43f, 0.43f, 1.0f), "%s",
+                Tr("探针失败，请查看日志后重新尝试。",
+                   "Probe failed. Check the logs and try again."));
+        }
+        else
+        {
+            ImGui::TextWrapped("%s",
+                Tr("尚未执行探针。选择进程后可在右侧直接开始。",
+                   "No probe has been run yet. Select a process and start from the right column."));
+        }
+        ImGui::EndChild();
+        ImGui::PopID();
+    };
+
+    auto drawActionPanel = [&](const char *title, const char *subtitle, bool showRecentLogs)
+    {
+        ImGui::PushID(title);
+        ImGui::BeginChild("##panel", ImVec2(0.0f, 0.0f), true);
+        drawSectionHeader(title, subtitle);
+
+        if (hasSelection)
+        {
+            const auto &candidate = gCandidates[gSelectedIndex];
+            ImGui::TextWrapped("%s: %s", Tr("已选包名", "Selected"), candidate.package.c_str());
+            ImGui::Text("PID: %d", candidate.pid);
+            ImGui::TextWrapped("Profile: %s", candidate.profileName.c_str());
+            ImGui::Text("%s: %s", Tr("模式", "Mode"),
+                        candidate.dedicated ? Tr("专用", "Dedicated")
+                                            : Tr("自动", "Auto"));
+        }
+        else
+        {
+            ImGui::TextWrapped("%s",
+                Tr("请先在左侧列表中选择一个进程。",
+                   "Select a process from the left list first."));
         }
 
-        // 各结构体标签
-        if (hasData)
+        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        drawActionButtons();
+        ImGui::Dummy(ImVec2(0.0f, 10.0f));
+
+        ImGui::Separator();
+        ImGui::Dummy(ImVec2(0.0f, 6.0f));
+        ImGui::Text("%s: %s", Tr("阶段", "Phase"), phase.c_str());
+        if (probeFinished)
         {
-            for (const auto &group : probeStructGroups)
+            ImGui::TextColored(probeSuccess ? ImVec4(0.36f, 0.92f, 0.45f, 1.0f)
+                                            : ImVec4(1.0f, 0.43f, 0.43f, 1.0f),
+                               "%s", probeSuccess ? Tr("探针成功", "Probe OK")
+                                                  : Tr("探针失败", "Probe Failed"));
+        }
+        if (dumpFinished)
+        {
+            ImGui::TextColored(dumpSuccess ? ImVec4(0.36f, 0.92f, 0.45f, 1.0f)
+                                           : ImVec4(1.0f, 0.43f, 0.43f, 1.0f),
+                               "%s", dumpSuccess ? Tr("Dump 成功", "Dump OK")
+                                                 : Tr("Dump 失败", "Dump Failed"));
+        }
+        if (soDumpFinished)
+        {
+            ImGui::TextColored(soDumpSuccess ? ImVec4(0.36f, 0.92f, 0.45f, 1.0f)
+                                             : ImVec4(1.0f, 0.43f, 0.43f, 1.0f),
+                               "%s", soDumpSuccess ? Tr("动态库导出成功", "Library dump OK")
+                                                   : Tr("动态库导出失败", "Library dump failed"));
+        }
+        if (!resultPath.empty() && dumpSuccess)
+            ImGui::TextWrapped("%s: %s", Tr("结果路径", "Output Path"), resultPath.c_str());
+        if (!soDumpPath.empty() && soDumpSuccess)
+            ImGui::TextWrapped("%s: %s", Tr("动态库路径", "Library Path"), soDumpPath.c_str());
+        if (!lastError.empty())
+            ImGui::TextWrapped("%s: %s", Tr("状态信息", "Status"), lastError.c_str());
+
+        if (objectsPercent > 0)
+        {
+            std::string label = std::string(Tr("对象扫描", "Objects scan")) + " " +
+                                std::to_string(objectsPercent) + "%";
+            ImGui::ProgressBar(objectsPercent / 100.0f, ImVec2(-1.0f, 0.0f), label.c_str());
+        }
+        if (dumpPercent > 0)
+        {
+            std::string label = std::string(Tr("Dump 进度", "Dump progress")) + " " +
+                                std::to_string(dumpPercent) + "%";
+            ImGui::ProgressBar(dumpPercent / 100.0f, ImVec2(-1.0f, 0.0f), label.c_str());
+        }
+
+        if (showRecentLogs && !logLines.empty())
+        {
+            ImGui::Dummy(ImVec2(0.0f, 8.0f));
+            ImGui::Separator();
+            ImGui::Dummy(ImVec2(0.0f, 6.0f));
+            ImGui::Text("%s", Tr("最近日志", "Recent Logs"));
+            if (ImGui::BeginChild("##recent_logs", ImVec2(0.0f, 160.0f), false, ImGuiWindowFlags_HorizontalScrollbar))
             {
-                if (!ImGui::BeginTabItem(group.name.c_str()))
-                    continue;
+                const int begin = static_cast<int>(logLines.size()) > 8
+                                    ? static_cast<int>(logLines.size()) - 8
+                                    : 0;
+                for (int i = begin; i < static_cast<int>(logLines.size()); ++i)
+                    ImGui::TextUnformatted(logLines[i].c_str());
+            }
+            ImGui::EndChild();
+        }
+        ImGui::EndChild();
+        ImGui::PopID();
+    };
 
-                ImGui::TextDisabled("%s",
-                    Tr("自动修补结果 (绿色=已识别, 红色=未识别)",
-                       "Auto-fix result (green = identified, red = unknown)"));
-                ImGui::Dummy(ImVec2(0.0f, 6.0f));
-                ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(10.0f, 8.0f));
-                ImGuiTableFlags flags = ImGuiTableFlags_Borders |
-                                        ImGuiTableFlags_RowBg |
-                                        ImGuiTableFlags_Resizable |
-                                        ImGuiTableFlags_ScrollY |
-                                        ImGuiTableFlags_SizingStretchProp |
-                                        ImGuiTableFlags_PadOuterX;
-                if (ImGui::BeginTable("##fields", 5, flags, ImVec2(0.0f, 0.0f)))
+    auto drawStructListPane = [&](const char *title, const char *subtitle)
+    {
+        ImGui::PushID(title);
+        ImGui::BeginChild("##panel", ImVec2(0.0f, 0.0f), true);
+        drawSectionHeader(title, subtitle);
+        if (hasData && ImGui::BeginChild("##struct_list_scroll", ImVec2(0.0f, 0.0f), false))
+        {
+            for (int i = 0; i < static_cast<int>(probeStructGroups.size()); ++i)
+            {
+                const auto &group = probeStructGroups[i];
+                std::string item = group.name + "\n" +
+                                   std::to_string(group.fields.size()) + Tr(" 个字段", " fields");
+                if (ImGui::Selectable(item.c_str(), selectedStructIndex == i, 0, ImVec2(0.0f, 54.0f)))
+                    selectedStructIndex = i;
+            }
+            ImGui::EndChild();
+        }
+        else
+        {
+            ImGui::TextWrapped("%s",
+                Tr("尚未探测到可用结构，请先完成探针流程。",
+                   "No structure data yet. Complete the probe first."));
+        }
+        ImGui::EndChild();
+        ImGui::PopID();
+    };
+
+    auto drawStructDetailPane = [&](const char *title, const char *subtitle)
+    {
+        ImGui::PushID(title);
+        ImGui::BeginChild("##panel", ImVec2(0.0f, 0.0f), true);
+        drawSectionHeader(title, subtitle);
+        if (hasData && selectedStructIndex >= 0 &&
+            selectedStructIndex < static_cast<int>(probeStructGroups.size()))
+        {
+            const auto &group = probeStructGroups[selectedStructIndex];
+            ImGui::Text("%s", group.name.c_str());
+            ImGui::TextDisabled("%s: %d", Tr("字段数量", "Field count"), static_cast<int>(group.fields.size()));
+            ImGui::Dummy(ImVec2(0.0f, 8.0f));
+            if (ImGui::BeginTable("##fields_detail", 5,
+                                  ImGuiTableFlags_Borders |
+                                  ImGuiTableFlags_RowBg |
+                                  ImGuiTableFlags_Resizable |
+                                  ImGuiTableFlags_ScrollY |
+                                  ImGuiTableFlags_SizingStretchProp,
+                                  ImVec2(0.0f, 0.0f)))
+            {
+                ImGui::TableSetupScrollFreeze(0, 1);
+                ImGui::TableSetupColumn(Tr("字段", "Field"),  ImGuiTableColumnFlags_WidthStretch, 1.5f);
+                ImGui::TableSetupColumn(Tr("类型", "Type"),   ImGuiTableColumnFlags_WidthStretch, 1.3f);
+                ImGui::TableSetupColumn(Tr("偏移", "Offset"), ImGuiTableColumnFlags_WidthStretch, 0.9f);
+                ImGui::TableSetupColumn(Tr("状态", "Status"), ImGuiTableColumnFlags_WidthStretch, 0.8f);
+                ImGui::TableSetupColumn(Tr("说明", "Notes"),  ImGuiTableColumnFlags_WidthStretch, 2.2f);
+                ImGui::TableHeadersRow();
+
+                for (const auto &field : group.fields)
                 {
-                    ImGui::TableSetupScrollFreeze(0, 1);
-                    ImGui::TableSetupColumn(Tr("字段", "Field"),  ImGuiTableColumnFlags_WidthStretch, 1.6f);
-                    ImGui::TableSetupColumn(Tr("类型", "Type"),   ImGuiTableColumnFlags_WidthStretch, 1.4f);
-                    ImGui::TableSetupColumn(Tr("偏移", "Offset"), ImGuiTableColumnFlags_WidthStretch, 0.9f);
-                    ImGui::TableSetupColumn(Tr("状态", "Status"), ImGuiTableColumnFlags_WidthStretch, 0.7f);
-                    ImGui::TableSetupColumn(Tr("说明", "Notes"),  ImGuiTableColumnFlags_WidthStretch, 2.4f);
-                    ImGui::TableHeadersRow();
-
-                    for (const auto &f : group.fields)
-                    {
-                        ImGui::TableNextRow();
-                        ImGui::TableSetColumnIndex(0);
-                        ImGui::TextUnformatted(f.name.c_str());
-                        ImGui::TableSetColumnIndex(1);
-                        ImGui::TextUnformatted(f.type.c_str());
-                        ImGui::TableSetColumnIndex(2);
-                        ImGui::Text("0x%lX", static_cast<unsigned long>(f.offset));
-                        ImGui::TableSetColumnIndex(3);
-                        if (f.found)
-                            ImGui::TextColored(ImVec4(0.35f, 0.95f, 0.35f, 1.0f), "%s",
-                                               Tr("已识别", "Identified"));
-                        else
-                            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s",
-                                               Tr("未识别", "Unknown"));
-                        ImGui::TableSetColumnIndex(4);
-                        ImGui::TextWrapped("%s", f.description.c_str());
-                    }
-                    ImGui::EndTable();
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::TextUnformatted(field.name.c_str());
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::TextUnformatted(field.type.c_str());
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::Text("0x%lX", static_cast<unsigned long>(field.offset));
+                    ImGui::TableSetColumnIndex(3);
+                    ImGui::TextColored(field.found ? ImVec4(0.36f, 0.92f, 0.45f, 1.0f)
+                                                   : ImVec4(1.0f, 0.43f, 0.43f, 1.0f),
+                                       "%s", field.found ? Tr("已识别", "Identified")
+                                                         : Tr("未识别", "Unknown"));
+                    ImGui::TableSetColumnIndex(4);
+                    ImGui::TextWrapped("%s", field.description.c_str());
                 }
-                ImGui::PopStyleVar();
-                ImGui::EndTabItem();
+                ImGui::EndTable();
             }
         }
         else
         {
-            const char *empty = Tr("尚未探测", "Not probed yet");
-            if (ImGui::BeginTabItem("UObject"))            { ImGui::TextDisabled("%s", empty); ImGui::EndTabItem(); }
-            if (ImGui::BeginTabItem("UField"))             { ImGui::TextDisabled("%s", empty); ImGui::EndTabItem(); }
-            if (ImGui::BeginTabItem("UStruct"))            { ImGui::TextDisabled("%s", empty); ImGui::EndTabItem(); }
-            if (ImGui::BeginTabItem("UClass"))             { ImGui::TextDisabled("%s", empty); ImGui::EndTabItem(); }
-            if (ImGui::BeginTabItem("UFunction"))          { ImGui::TextDisabled("%s", empty); ImGui::EndTabItem(); }
-            if (ImGui::BeginTabItem("FField+FProperty"))   { ImGui::TextDisabled("%s", empty); ImGui::EndTabItem(); }
+            ImGui::TextWrapped("%s",
+                Tr("左侧还没有可显示的结构数据。",
+                   "There is no structure data to display yet."));
         }
+        ImGui::EndChild();
+        ImGui::PopID();
+    };
 
-        if (ImGui::BeginTabItem(Tr("SDK 浏览器", "SDK Explorer")))
-        {
-            SDKExplorer::SetLanguage(gUiLang == UiLang::ZH ? 0 : 1);
-            SDKExplorer::Render();
-            ImGui::EndTabItem();
-        }
-
-        ImGui::EndTabBar();
-    }
-    ImGui::EndChild();
-
-    ImGui::EndChild();
-
-    // ========== 底部: 运行日志 ==========
-    ImGui::Separator();
-    ImGui::Dummy(ImVec2(0.0f, 4.0f));
-    ImGui::Text("%s", Tr("运行日志", "Logs"));
-    if (ImGui::BeginChild("##logs", ImVec2(0.0f, 0.0f), true, ImGuiWindowFlags_HorizontalScrollbar))
+    auto drawOverviewCard = [&](const char *childId, float width, const char *title, const char *value, const char *subtitle)
     {
-        for (const auto &line : logLines)
-            ImGui::TextUnformatted(line.c_str());
+        ImGui::PushID(childId);
+        ImGui::BeginChild("##metric", ImVec2(width, 92.0f), true);
+        ImGui::TextDisabled("%s", title);
+        ImGui::Text("%s", value);
+        if (subtitle && *subtitle)
+            ImGui::TextDisabled("%s", subtitle);
+        ImGui::EndChild();
+        ImGui::PopID();
+    };
 
-        if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
-            ImGui::SetScrollHereY(1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(12.0f, 12.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12.0f, 9.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(10.0f, 8.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.0f, 14.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 14.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 10.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding, 10.0f);
+
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.07f, 0.09f, 0.13f, 0.96f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.11f, 0.13f, 0.19f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.16f, 0.22f, 0.32f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.18f, 0.26f, 0.39f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.27f, 0.42f, 0.95f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.24f, 0.38f, 0.58f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.19f, 0.33f, 0.53f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.14f, 0.22f, 0.34f, 0.90f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.19f, 0.31f, 0.47f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.16f, 0.27f, 0.42f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.22f, 0.28f, 0.40f, 0.90f));
+    ImGui::PushStyleColor(ImGuiCol_Separator, ImVec4(0.20f, 0.26f, 0.37f, 0.90f));
+
+    const float sidebarWidth = 180.0f;
+    const float topBarHeight = 92.0f;
+    const float leftColumnWidth = 320.0f;
+    const float middleColumnWidth = 310.0f;
+
+    const char *pageTitle = Tr("总览面板", "Overview");
+    const char *pageSubtitle = Tr("总览面板", "Overview");
+    switch (navPage)
+    {
+        case NavProcess:
+            pageTitle = Tr("进程管理", "Process Manager");
+            pageSubtitle = Tr("选择当前游戏进程并执行探测或导出", "Select target process and run probe/dump");
+            break;
+        case NavStructs:
+            pageTitle = Tr("结构浏览", "Struct Browser");
+            pageSubtitle = Tr("查看 AutoFix 后的结构体字段结果", "Browse AutoFix struct field results");
+            break;
+        case NavExplorer:
+            pageTitle = Tr("SDK 浏览器", "SDK Explorer");
+            pageSubtitle = Tr("在单独工作区中查看导出的 SDK 内容", "Inspect SDK content in a focused workspace");
+            break;
+        case NavLogs:
+            pageTitle = Tr("运行日志", "Logs");
+            pageSubtitle = Tr("查看实时输出和错误信息", "Inspect runtime output and errors");
+            break;
+        case NavSettings:
+            pageTitle = Tr("设置中心", "Settings");
+            pageSubtitle = Tr("语言、主题和项目信息", "Language, theme and project information");
+            break;
+        default:
+            break;
     }
+
+    ImGui::BeginChild("##tool_root", ImVec2(0.0f, 0.0f), false);
+
+    ImGui::BeginChild("##sidebar", ImVec2(sidebarWidth, 0.0f), true);
+    ImGui::Text("UnrealMemoryTools");
+    ImGui::TextDisabled("UnrealEngine4.1x-5.0x");
+    ImGui::Dummy(ImVec2(0.0f, 10.0f));
+    ImGui::Separator();
+    ImGui::Dummy(ImVec2(0.0f, 10.0f));
+
+    if (drawNavButton(Tr("总览", "Overview"), navPage == NavOverview)) navPage = NavOverview;
+    if (drawNavButton(Tr("进程", "Processes"), navPage == NavProcess)) navPage = NavProcess;
+    if (drawNavButton(Tr("结构", "Structs"), navPage == NavStructs)) navPage = NavStructs;
+    if (drawNavButton(Tr("SDK", "SDK"), navPage == NavExplorer)) navPage = NavExplorer;
+    if (drawNavButton(Tr("日志", "Logs"), navPage == NavLogs)) navPage = NavLogs;
+    if (drawNavButton(Tr("设置", "Settings"), navPage == NavSettings)) navPage = NavSettings;
+
+    const float sidebarFooter = ImGui::GetWindowHeight() - 96.0f;
+    if (ImGui::GetCursorPosY() < sidebarFooter)
+        ImGui::SetCursorPosY(sidebarFooter);
+    ImGui::Separator();
+    ImGui::TextDisabled("%s %s", Tr("版本", "Version"), kUEDUMPER_VERSION);
+    ImGui::TextDisabled("%s", Tr("禁止盗卖圈钱", "No reselling for profit"));
     ImGui::EndChild();
 
-    ImGui::PopStyleVar(4);
+    ImGui::SameLine(0.0f, 14.0f);
+
+    ImGui::BeginChild("##workspace", ImVec2(0.0f, 0.0f), false);
+    ImGui::BeginChild("##topbar", ImVec2(0.0f, topBarHeight), true);
+    ImGui::Text("%s", pageTitle);
+    ImGui::TextDisabled("%s", pageSubtitle);
+    if (!selectedPackage.empty())
+    {
+        ImGui::TextDisabled("%s: %s", Tr("当前目标", "Current target"), selectedPackage.c_str());
+    }
+    else
+    {
+        ImGui::TextDisabled("%s", Tr("当前未选择进程", "No process selected"));
+    }
+
+    const float rightStart = ImGui::GetWindowWidth() - 320.0f;
+    if (rightStart > 0.0f)
+        ImGui::SameLine(rightStart);
+    if (busy)
+        drawStatusChip(Tr("运行中", "Busy"), ImVec4(0.85f, 0.55f, 0.16f, 0.95f));
+    else
+        drawStatusChip(Tr("空闲", "Idle"), ImVec4(0.18f, 0.63f, 0.42f, 0.95f));
+    ImGui::SameLine(0.0f, 10.0f);
+    if (ImGui::Button("ZH", ImVec2(52.0f, 0.0f))) gUiLang = UiLang::ZH;
+    ImGui::SameLine(0.0f, 6.0f);
+    if (ImGui::Button("EN", ImVec2(52.0f, 0.0f))) gUiLang = UiLang::EN;
+    ImGui::SameLine(0.0f, 6.0f);
+    if (ImGui::Button(Tr("退出", "Exit"), ImVec2(78.0f, 0.0f)))
+        *main_thread_flag = false;
+    ImGui::EndChild();
+
+    ImGui::Dummy(ImVec2(0.0f, 12.0f));
+
+    if (navPage == NavExplorer)
+    {
+        ImGui::BeginChild("##explorer_card", ImVec2(0.0f, 0.0f), true);
+        drawSectionHeader(Tr("SDK 浏览器", "SDK Explorer"),
+                          Tr("此区域保持原有浏览功能，但外层布局改为卡片式容器",
+                             "The explorer remains intact inside the new card layout"));
+        SDKExplorer::SetLanguage(gUiLang == UiLang::ZH ? 0 : 1);
+        SDKExplorer::Render();
+        ImGui::EndChild();
+    }
+    else if (navPage == NavLogs)
+    {
+        ImGui::BeginChild("##logs_card", ImVec2(0.0f, 0.0f), true);
+        drawSectionHeader(Tr("运行日志", "Logs"),
+                          Tr("这里汇总了探测、Dump 与动态库导出的实时输出",
+                             "Probe, dump and library export messages are shown here"));
+        if (ImGui::Button(Tr("清空日志", "Clear Logs"), ImVec2(160.0f, 0.0f)))
+        {
+            std::lock_guard<std::mutex> lock(gDumpUiState.mutex);
+            gDumpUiState.logLines.clear();
+        }
+        ImGui::Dummy(ImVec2(0.0f, 6.0f));
+        if (ImGui::BeginChild("##logs_scroll", ImVec2(0.0f, 0.0f), false, ImGuiWindowFlags_HorizontalScrollbar))
+        {
+            for (const auto &line : logLines)
+                ImGui::TextUnformatted(line.c_str());
+
+            if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
+                ImGui::SetScrollHereY(1.0f);
+        }
+        ImGui::EndChild();
+        ImGui::EndChild();
+    }
+    else if (navPage == NavSettings)
+    {
+        ImGui::BeginChild("##settings_card", ImVec2(0.0f, 0.0f), true);
+        drawSectionHeader(Tr("设置中心", "Settings"),
+                          Tr("语言、主题与项目信息集中在此页",
+                             "Language, theme and project information live here"));
+
+        ImGui::Text("%s", Tr("语言", "Language"));
+        if (ImGui::Button("中文", ImVec2(120.0f, 0.0f))) gUiLang = UiLang::ZH;
+        ImGui::SameLine(0.0f, 10.0f);
+        if (ImGui::Button("English", ImVec2(120.0f, 0.0f))) gUiLang = UiLang::EN;
+
+        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        ImGui::Text("%s", Tr("主题", "Theme"));
+        if (ImGui::Combo("##theme_combo", &themeIndex,
+                         Tr("白色主题\0蓝色主题\0紫色主题\0",
+                            "Light\0Dark\0Classic\0")))
+        {
+            applyTheme(themeIndex);
+        }
+
+        ImGui::Dummy(ImVec2(0.0f, 10.0f));
+        ImGui::Separator();
+        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        ImGui::Text("%s: 曦曦(DreamFekk)", Tr("创作者", "Author"));
+        ImGui::TextWrapped("GitHub: https://github.com/DreamFekk");
+        ImGui::TextWrapped("%s: %s", Tr("输出目录", "Output"), kOutputDirectory);
+        ImGui::TextWrapped("%s: %s", Tr("渲染接口", "Renderer"), graphics->RenderName);
+        ImGui::Text("%s: %.1f", Tr("当前 FPS", "Current FPS"), ImGui::GetIO().Framerate);
+        ImGui::EndChild();
+    }
+    else if (navPage == NavOverview)
+    {
+        const float metricSpacing = 14.0f;
+        const float metricWidth = (ImGui::GetContentRegionAvail().x - metricSpacing * 2.0f) / 3.0f;
+        std::string processCountText = std::to_string(gCandidates.size());
+        std::string structCountText = std::to_string(probeStructGroups.size());
+        std::string phaseText = phase.empty() ? std::string(Tr("空闲", "Idle")) : phase;
+
+        drawOverviewCard("##overview_metric_process", metricWidth, Tr("进程数量", "Processes"), processCountText.c_str(),
+                         Tr("已识别的 UE 目标实例", "Detected Unreal Engine targets"));
+        ImGui::SameLine(0.0f, metricSpacing);
+        drawOverviewCard("##overview_metric_struct", metricWidth, Tr("结构分组", "Struct Groups"), structCountText.c_str(),
+                         Tr("探针成功后可浏览的结构组", "Groups available after a successful probe"));
+        ImGui::SameLine(0.0f, metricSpacing);
+        drawOverviewCard("##overview_metric_phase", metricWidth, Tr("当前阶段", "Current Phase"), phaseText.c_str(),
+                         busy ? Tr("任务正在执行", "A task is running")
+                              : Tr("当前没有后台任务", "No background task is running"));
+
+        ImGui::Dummy(ImVec2(0.0f, 12.0f));
+
+        ImGui::BeginChild("##overview_left", ImVec2(leftColumnWidth + 80.0f, 0.0f), false);
+        drawProbeSummaryPane(Tr("探针总览", "Probe Overview"),
+                             Tr("总览页聚合当前探针状态和结构摘要",
+                                "Overview aggregates the current probe state and struct summary"),
+                             true);
+        ImGui::EndChild();
+
+        ImGui::SameLine(0.0f, 14.0f);
+        drawActionPanel(Tr("快捷操作", "Quick Actions"),
+                        Tr("总览页只保留最常用的动作和状态",
+                           "Only the most common actions and status are kept here"),
+                        true);
+    }
+    else if (navPage == NavProcess)
+    {
+        ImGui::BeginChild("##process_left", ImVec2(leftColumnWidth, 0.0f), false);
+        drawProcessListPane("##process_manage_left", Tr("进程库", "Process Library"),
+                            Tr("专门用于进程选择与切换",
+                               "Dedicated to process selection and switching"));
+        ImGui::EndChild();
+
+        ImGui::SameLine(0.0f, 14.0f);
+
+        ImGui::BeginChild("##process_middle", ImVec2(middleColumnWidth, 0.0f), false);
+        ImGui::BeginChild("##process_detail_card", ImVec2(0.0f, 0.0f), true);
+        drawSectionHeader(Tr("当前进程", "Current Process"),
+                          Tr("这里专门显示选中进程的身份信息，不再和总览页混用",
+                             "Identity details live here instead of being mixed into overview"));
+        if (hasSelection)
+        {
+            const auto &candidate = gCandidates[gSelectedIndex];
+            ImGui::TextWrapped("%s: %s", Tr("包名", "Package"), candidate.package.c_str());
+            ImGui::Text("PID: %d", candidate.pid);
+            ImGui::TextWrapped("Profile: %s", candidate.profileName.c_str());
+            ImGui::Text("%s: %s", Tr("模式", "Mode"),
+                        candidate.dedicated ? Tr("专用", "Dedicated")
+                                            : Tr("自动", "Auto"));
+            ImGui::Dummy(ImVec2(0.0f, 8.0f));
+            ImGui::Separator();
+            ImGui::Dummy(ImVec2(0.0f, 8.0f));
+            ImGui::Text("%s", Tr("探针匹配状态", "Probe Match"));
+            ImGui::TextColored(probeMatchesSelection ? ImVec4(0.36f, 0.92f, 0.45f, 1.0f)
+                                                     : ImVec4(1.0f, 0.43f, 0.43f, 1.0f),
+                               "%s", probeMatchesSelection ? Tr("当前探针结果可直接复用", "Current probe can be reused")
+                                                          : Tr("当前探针结果与所选进程不匹配", "Probe result does not match selection"));
+        }
+        else
+        {
+            ImGui::TextWrapped("%s",
+                Tr("还没有选中进程，请先在左侧列表中点击一个目标。",
+                   "No process selected yet. Pick one from the left list."));
+        }
+        ImGui::EndChild();
+        ImGui::EndChild();
+
+        ImGui::SameLine(0.0f, 14.0f);
+        drawActionPanel(Tr("进程操作", "Process Actions"),
+                        Tr("进程页专注于探测、Dump 和状态回显",
+                           "The process page focuses on probe, dump and status"),
+                        true);
+    }
+    else if (navPage == NavStructs)
+    {
+        ImGui::BeginChild("##struct_left", ImVec2(260.0f, 0.0f), false);
+        drawStructListPane(Tr("结构列表", "Struct List"),
+                           Tr("这里只负责结构分组切换",
+                              "This column only handles struct group selection"));
+        ImGui::EndChild();
+
+        ImGui::SameLine(0.0f, 14.0f);
+
+        ImGui::BeginChild("##struct_mid", ImVec2(250.0f, 0.0f), false);
+        drawProbeSummaryPane(Tr("结构摘要", "Struct Summary"),
+                             Tr("补充展示当前探针成功后的结构摘要与偏移",
+                                "Shows offset and struct summary after a successful probe"),
+                             false);
+        ImGui::EndChild();
+
+        ImGui::SameLine(0.0f, 14.0f);
+        drawStructDetailPane(Tr("字段详情", "Field Details"),
+                             Tr("右侧只保留字段明细，不再混入操作按钮",
+                                "The right pane now stays focused on field details"));
+    }
+
+    ImGui::EndChild();
+    ImGui::EndChild();
+
+    ImGui::PopStyleColor(11);
+    ImGui::PopStyleVar(7);
 }
 
 

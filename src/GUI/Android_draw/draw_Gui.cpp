@@ -99,30 +99,22 @@ void drawBegin() {
 
 
 void Layout_tick_UI(bool *main_thread_flag) {
-    static int style_idx = 1;
     { 
-        ImGui::SetNextWindowSize(ImVec2(980.0f, 760.0f), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowPos(ImVec2(120.0f, 140.0f), ImGuiCond_FirstUseEver);
-        ImGui::Begin("UnrealMemoryTools  创作者: 曦曦(DreamFekk) https://github.com/DreamFekk", main_thread_flag);
+        ImGui::SetNextWindowSize(ImVec2(1280.0f, 840.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowPos(ImVec2(90.0f, 110.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowBgAlpha(0.92f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 18.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.2f);
+        ImGui::Begin("##UnrealMemoryToolsWindow", main_thread_flag,
+                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
         if (::permeate_record_ini) {
             ImGui::SetWindowPos({LastCoordinate.Pos_x, LastCoordinate.Pos_y});
             ImGui::SetWindowSize({LastCoordinate.Size_x, LastCoordinate.Size_y});
             permeate_record_ini = false;   
         }
-        ImGui::Text("渲染接口: %s | GUI: %s", graphics->RenderName, ImGui::GetVersion());
-        if (ImGui::Combo("主题", &style_idx, "白色主题\0蓝色主题\0紫色主题\0")) {
-            switch (style_idx) {
-                case 0: ImGui::StyleColorsLight(); break;
-                case 1: ImGui::StyleColorsDark(); break;
-                case 2: ImGui::StyleColorsClassic(); break;
-            }
-        }
-
-        ImGui::Separator();
         RenderAutoUEDumpPanel(main_thread_flag);
-        ImGui::Separator();
-        ImGui::Text("应用平均 %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
         g_window = ImGui::GetCurrentWindow();
         ImGui::End();
+        ImGui::PopStyleVar(2);
     }
 }
