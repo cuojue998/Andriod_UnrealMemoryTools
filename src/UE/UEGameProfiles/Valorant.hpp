@@ -63,8 +63,7 @@ public:
     uintptr_t GetFrameCount() const override
     {
         PATTERN_MAP_TYPE map_type = isEmulator() ? PATTERN_MAP_TYPE::ANY_R : PATTERN_MAP_TYPE::ANY_X;
-
-        std::string ida_pattern = "? ? ? F0 ? ? ? F9 ? ? ? F9 C0 03 5F D6 ? ? ? A9 FD 03 00 91 ? ? ? D0";
+        std::string ida_pattern = "? ? ? ? ? ? ? F9 ? ? ? F9 C0 03 5F D6 ? ? ? A9 FD 03 00 91";
         const int step = 0;
         auto FrameOff = Arm64::Decode_ADRP_LDR(findIdaPattern(map_type, ida_pattern, step));
         if (FrameOff !=0)
@@ -115,15 +114,14 @@ public:
     {
         auto base = GetUEVars()->GetBaseAddress();
         //printf("0x%lx\n", base);
-        std::string GetAccessoriesAllRecoilFactorModifier = "? ? ? 71 ? ? ? 54 ? ? ? 91 E1 03 1F AA ? ? ? 96 ? ? ? 52";
+        std::string GetAccessoriesAllRecoilFactorModifier = "? ? ? 34 ? ? ? F9 ? ? ? 91 ? ? ? D3 ? ? ? B8 ? ? ? 35 ? ? ? F1 ? ? ? 91 ? ? ? 54 ? ? ? B9 ? ? ? 34 ? ? ? F8 ? ? ? B4 ? ? ? 96 ? ? ? 52 E0 03 13 AA";
         PATTERN_MAP_TYPE map_type = isEmulator() ? PATTERN_MAP_TYPE::ANY_R : PATTERN_MAP_TYPE::ANY_X;
         printf("GetAccessoriesAllRecoilFactorModifierOffset:0x%lX\n", findIdaPattern(map_type, GetAccessoriesAllRecoilFactorModifier, 0) - base);
 
         std::string WallHackAddress = "? ? ? 35 ? ? ? 39 ? ? ? 34 F4 03 00 2A";
         PATTERN_MAP_TYPE map_type1 = isEmulator() ? PATTERN_MAP_TYPE::ANY_R : PATTERN_MAP_TYPE::ANY_X;
         printf("WallHackAddressOffset:0x%lX\n", findIdaPattern(map_type1, WallHackAddress, 0) - base);
-
-        std::string CalShootTargetLocation = "? ? ? 2D ? ? ? BD ? ? ? 39 ? ? ? BD ? ? ? 34";
+        std::string CalShootTargetLocation = "? ? ? 2D ? ? ? FD ? ? ? BD ? ? ? 0D";
         PATTERN_MAP_TYPE map_type2 = isEmulator() ? PATTERN_MAP_TYPE::ANY_R : PATTERN_MAP_TYPE::ANY_X;
         printf("CalShootTargetLocationOffset:0x%lX\n", findIdaPattern(map_type2, CalShootTargetLocation, 0) - base);
     }
