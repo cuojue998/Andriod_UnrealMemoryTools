@@ -16,12 +16,18 @@ public:
 
     std::string GetAppName() const override
     {
-        return "和平精英";
+        return "PUBG";
     }
 
     std::vector<std::string> GetAppIDs() const override
     {
-        return {"com.tencent.tmgp.pubgmhd"};
+        return {
+            "com.tencent.ig",
+            "com.rekoo.pubgm",
+            "com.pubg.imobile",
+            "com.pubg.krmobile",
+            "com.vng.pubgmobile",
+        };
     }
 
     bool isUsingCasePreservingName() const override
@@ -39,28 +45,40 @@ public:
         return false;
     }
 
-        uintptr_t GetGUObjectArrayPtr() const override
+    uintptr_t GetGUObjectArrayPtr() const override
     {
-        return IGameProfile::GetGUObjectArrayPtr();
-    }    void print_func() const
-    {
-        auto base = GetUEVars()->GetBaseAddress();
-        //printf("0x%lx\n", base);
-        std::string CalShootTargetLocationBP = "60 1C A3 4E 81 1C A4 4E A2 1C A5 4E C0 03 5F D6 ? ? ? F9";
-        std::string DecArray = "0F 11 00 B9 1B 21 00 B9 0E 31 00 B9 0F 41 00 B9 1B 51 00 B9 18 61 00 B9 19 71 00 B9 1A 81 00 B9 17 91 00 B9 0B A1 00 B9 1F B1 00 B9 1F C1 00 B9 0D D1 00 B9 0A E1 00 B9 08 C1 03 91";
-        std::string GetAccessoriesDeviationFactor = "? ? ? BD 81 09 21 1E 00 28 21 1E 40 09 20 1E";
-        std::string GetAccessoriesAllRecoilFactorModifier = "40 08 20 1E ? ? ? 71";
-        std::string AnimationKick = "0B 08 2B 1E 00 01 3F D6";
+        std::string ida_pattern = "12 40 B9 ? 3E 40 B9 ? ? ? 6B ? ? ? 54 ? ? ? ? ? ? ? 91";
+        const int step = 0xf;
+
         PATTERN_MAP_TYPE map_type = isEmulator() ? PATTERN_MAP_TYPE::ANY_R : PATTERN_MAP_TYPE::ANY_X;
-        printf("CalShootTargetLocationBPOffset:0x%lX\n", findIdaPattern(map_type, CalShootTargetLocationBP, 0) - base);
-        printf("DecArrayOffset:0x%lX\n", findIdaPattern(map_type, DecArray, 0) - base);
-        printf("GetAccessoriesDeviationFactorOffset:0x%lX\n", findIdaPattern(map_type, GetAccessoriesDeviationFactor, 0) - base);
-        printf("GetAccessoriesAllRecoilFactorModifierOffset:0x%lX\n", findIdaPattern(map_type, GetAccessoriesAllRecoilFactorModifier, 0) - base);
-        printf("AnimationKickOffset:0x%lX\n", findIdaPattern(map_type, AnimationKick, 0) - base);
+
+        return Arm64::Decode_ADRP_ADD(findIdaPattern(map_type, ida_pattern, step));
     }
+
     uintptr_t GetNamesPtr() const override
     {
-        return IGameProfile::GetNamesPtr();
+        std::string ida_pattern =  "81 80 52 ? ? ? ? ? 81 80 52 ? 03 1F 2A";
+        const int step = 0x1f;
+
+        PATTERN_MAP_TYPE map_type = isEmulator() ? PATTERN_MAP_TYPE::ANY_R : PATTERN_MAP_TYPE::ANY_X;
+
+        uintptr_t param_1 = Arm64::Decode_ADRP_ADD(findIdaPattern(map_type, ida_pattern, step));
+        if (param_1 == 0)
+            return 0;
+
+        int64_t var_2;
+        int64_t var_5[16];
+
+        var_2 = (vm_rpm_ptr<int32_t>((void *)(param_1)) - 100) / 3u;
+        var_5[(uint32_t)(var_2 - 1)] = vm_rpm_ptr<int64_t>((void *)(param_1 + 8));
+
+        while (var_2 - 2 >= 0)
+        {
+            var_5[(uint32_t)(var_2 - 2)] = vm_rpm_ptr<int64_t>((void *)(var_5[var_2 - 1]));
+            --var_2;
+        }
+
+        return var_5[0];
     }
     uintptr_t GetFrameCount() const override
     {
@@ -125,7 +143,6 @@ public:
             once = true;
             offsets.FNameEntry.Index = sizeof(void *);
             offsets.FNameEntry.Name = sizeof(void *) + sizeof(int32_t);
-            offsets.TUObjectArray.NumElements = 0x38;
         }
 
         return &offsets;
