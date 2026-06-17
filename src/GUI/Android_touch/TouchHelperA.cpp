@@ -11,7 +11,6 @@
 #include "spinlock.h"
 
 #include "imgui.h"
-#include "imgui_internal.h"
 #include "TouchHelperA.h"
 #include "Utils.h"
 
@@ -26,11 +25,20 @@ namespace Touch {
     // press to release; this avoids "drag from UI into game (or vice versa)"
     // mid-gesture jumps. None = not yet decided.
     //
-    // Decision is made from the current touch position against visible ImGui
-    // windows, so taps outside the menu are forwarded to the system immediately.
+    // Decision is *not* made on the very first SYN_REPORT, because at that
+    // point io.WantCaptureMouse still reflects the previous NewFrame()
+    // result (based on the previous io.MousePos). We must let at least one
+    // NewFrame() run on the freshly-set io.MousePos before trusting
+    // WantCaptureMouse — otherwise a press in the UI right after a press
+    // outside the UI (or vice versa) gets locked to the wrong target.
     enum class TouchOwner : uint8_t { None, ImGui, System };
     static std::array<std::array<TouchOwner, maxF>, maxE> finger_owner{};
 
+    // ImGui frame count at touch-down. We wait for ImGui::GetFrameCount()
+    // to advance past this before locking a still-undecided sequence to
+    // TouchOwner::System (i.e. the system path). -1 means "no press / not
+    // tracked".
+    static std::array<std::array<int, maxF>, maxE> finger_press_frame{};
     static std::array<std::array<bool, maxF>, maxE> finger_forwarded_to_system{};
 
     static struct {
@@ -57,27 +65,6 @@ namespace Touch {
     static std::function<void(std::vector<Device> *)> callback;
 
     static spinlock lock;
-
-    static bool IsPointInsideImGuiWindow(const ImVec2& pos) {
-        ImGuiContext* ctx = ImGui::GetCurrentContext();
-        if (!ctx) {
-            return false;
-        }
-        for (int n = ctx->Windows.Size - 1; n >= 0; --n) {
-            ImGuiWindow* window = ctx->Windows[n];
-            if (!window || !window->WasActive || window->Hidden) {
-                continue;
-            }
-            if ((window->Flags & ImGuiWindowFlags_NoInputs) != 0) {
-                continue;
-            }
-            const ImRect rect(window->OuterRectClipped.Min, window->OuterRectClipped.Max);
-            if (rect.Contains(pos)) {
-                return true;
-            }
-        }
-        return false;
-    }
 
     static bool ShouldUploadFinger(size_t deviceIndex, size_t fingerIndex, bool systemOnly) {
         if (deviceIndex >= devices.size() || fingerIndex >= maxF)
@@ -264,10 +251,16 @@ namespace Touch {
                         } else {
                             device.Finger[latest].id = (i * 2 + 1) * maxF + latest;
                             device.Finger[latest].isDown = true;
-                            // New press — leave owner as None until SYN_REPORT
-                            // decides from the current touch position.
+                            // New press — leave owner as None and remember
+                            // which ImGui frame this press started on, so
+                            // SYN_REPORT can wait for at least one fresh
+                            // NewFrame before deciding.
                             if ((size_t) i < maxE && (size_t) latest < maxF) {
                                 finger_owner[i][latest] = TouchOwner::None;
+                                finger_press_frame[i][latest] =
+                                    ImGui::GetCurrentContext()
+                                        ? ImGui::GetFrameCount()
+                                        : -1;
                                 finger_forwarded_to_system[i][latest] = false;
                             }
                         }
@@ -286,35 +279,58 @@ namespace Touch {
                 }
                 if (ie.code == SYN_REPORT) {
                     TouchOwner *owner = nullptr;
+                    int press_frame = -1;
                     if ((size_t) i < maxE && (size_t) latest < maxF) {
                         owner = &finger_owner[i][latest];
+                        press_frame = finger_press_frame[i][latest];
                     }
 
                     const bool nowDown = device.Finger[latest].isDown;
                     const bool imguiReady =
                         (ImGui::GetCurrentContext() != nullptr);
-                    bool pointInsideImGui = false;
+                    bool wantCapture = false;
+                    int curFrame = -1;
 
                     if (imguiReady) {
                         ImGuiIO &io = ImGui::GetIO();
 
-                        // Always keep io.MousePos in sync. Ownership is
-                        // decided from the current touch position instead of
-                        // waiting for stale WantCaptureMouse to refresh.
+                        // Always keep io.MousePos in sync, regardless of
+                        // ownership. The next NewFrame() must compute
+                        // WantCaptureMouse from the *current* finger
+                        // position; sending an old position there is what
+                        // caused the previous "first press locks to the
+                        // wrong target" bug.
                         if (nowDown) {
                             auto pos = Touch2Screen(device.Finger[latest].pos);
-                            const ImVec2 mousePos(pos.x, pos.y);
-                            io.MousePos = mousePos;
-                            pointInsideImGui = IsPointInsideImGuiWindow(mousePos);
+                            io.MousePos = ImVec2(pos.x, pos.y);
                         }
+
+                        wantCapture = io.WantCaptureMouse;
+                        curFrame = ImGui::GetFrameCount();
                     }
 
                     // Sequence ownership decision.
-                    // Use the current touch position against visible ImGui
-                    // windows so touches outside the menu go to the system
-                    // immediately.
+                    //   - WantCaptureMouse=true → lock to ImGui immediately
+                    //     (UI already wants the mouse based on the position
+                    //     we just fed in or a previous frame).
+                    //   - WantCaptureMouse=false → DO NOT lock to System
+                    //     yet, because WantCaptureMouse may be stale (it
+                    //     reflects the *previous* NewFrame's MousePos).
+                    //     Wait until ImGui::GetFrameCount() has advanced
+                    //     past press_frame, i.e. at least one NewFrame()
+                    //     has run with the new io.MousePos. Only then is
+                    //     a "still false" a trustworthy signal that this
+                    //     finger really is outside the UI.
+                    //   - If ImGui isn't ready at all, fall straight to
+                    //     System so events aren't lost.
                     if (owner && *owner == TouchOwner::None && nowDown) {
-                        *owner = pointInsideImGui ? TouchOwner::ImGui : TouchOwner::System;
+                        if (wantCapture) {
+                            *owner = TouchOwner::ImGui;
+                        } else if (!imguiReady ||
+                                   (press_frame >= 0 && curFrame > press_frame)) {
+                            *owner = TouchOwner::System;
+                        }
+                        // else: undecided, retry next SYN_REPORT
                     }
 
                     // io.MouseDown must mirror the ownership and current
@@ -345,13 +361,15 @@ namespace Touch {
                         }
                     }
 
-                    // Safety fallback: if a release arrives while ownership
-                    // is still undecided and the point is outside ImGui, replay
-                    // a synthetic system tap so non-UI clicks are not swallowed.
+                    // A quick tap outside ImGui may press and release before
+                    // a fresh NewFrame advances WantCaptureMouse. In that
+                    // case the sequence is still undecided at release time;
+                    // replay a synthetic system tap so non-UI clicks are not
+                    // swallowed.
                     if (!readOnly && owner && *owner == TouchOwner::None && !nowDown &&
                         (size_t) i < maxE && (size_t) latest < maxF &&
                         !finger_forwarded_to_system[i][latest] &&
-                        !pointInsideImGui) {
+                        (!imguiReady || !wantCapture)) {
                         *owner = TouchOwner::System;
                         device.Finger[latest].isDown = true;
                         if (callback) {
@@ -369,10 +387,11 @@ namespace Touch {
                     }
 
                     // Release frame has been dispatched; reset ownership
-                    // so the next press is decided fresh.
+                    // and press-frame so the next press is decided fresh.
                     if (owner && !nowDown) {
                         *owner = TouchOwner::None;
                         if ((size_t) i < maxE && (size_t) latest < maxF) {
+                            finger_press_frame[i][latest] = -1;
                             finger_forwarded_to_system[i][latest] = false;
                         }
                     }
