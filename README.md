@@ -173,7 +173,7 @@ For learning, reverse-engineering practice, and personal research only. **Do not
 
 ### 界面预览
 
-![中文界面](CH.jpg)
+![中文界面](CN.jpg)
 
 ### 特性
 
