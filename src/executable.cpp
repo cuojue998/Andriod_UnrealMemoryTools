@@ -27,7 +27,6 @@
 #include "UE/UEGameProfiles/DeltaForce.hpp"
 #include "UE/UEGameProfiles/Farlight.hpp"
 #include "UE/UEGameProfiles/NRC.hpp"
-#include "UE/UEGameProfiles/PUBGMHD.hpp"
 #include "UE/UEGameProfiles/PUBG.hpp"
 #include "UE/UEGameProfiles/Sfps2.hpp"
 #include "UE/UEGameProfiles/Valorant.hpp"
@@ -42,7 +41,6 @@ std::vector<IGameProfile *> UE_Games = {
     new ShuishaProfile(),
     new ValorantProfile(),
     new NRCProfile(),
-    new PUBGMHDProfile(),
     new PUBGProfile(),
 };
 

@@ -667,7 +667,7 @@ uint8_t *IGameProfile::GetNameEntry(int32_t id) const
             //printf("gNames = 0x%lx\n", (unsigned long)gNames);
             if (HasAppId(this, "com.tencent.ig"))
             {
-
+                
                 const uintptr_t level0 = vm_rpm_ptr<uintptr_t>((void *)(gNames + 0x110));
                 const uintptr_t level1 = vm_rpm_ptr<uintptr_t>((void *)level0);
                 gNames = vm_rpm_ptr<uintptr_t>((void *)level1);;
