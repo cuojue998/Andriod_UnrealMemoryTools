@@ -12,21 +12,23 @@ jobs:
         with:
           submodules: true
 
-      - name: Install cmake ninja
+      - name: Install tools
         run: sudo apt update && sudo apt install cmake ninja-build -y
 
-      - name: Download NDK
+      - name: Setup NDK r26b
         uses: nttld/setup-ndk@v1
         id: ndk
         with:
-          ndk-version: r25c
+          ndk-version: r26b
 
-      # 核心：直接修改CMake文件里写死的Windows路径
-      - name: Fix CMake hard path
+      - name: Fix hardcode path
         run: sed -i "s|set(NDK_PATH E:/ndk/android-ndk-r29)|set(NDK_PATH ${{ steps.ndk.outputs.ndk-path }})|" CMakeLists.txt
 
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: |
+          cmake -S . -B build -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_CXX_FLAGS="-fno-char8_t -Wno-ambiguous-operator"
 
       - name: Compile
         run: cmake --build build -j$(nproc)
