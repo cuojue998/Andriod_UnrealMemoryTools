@@ -1,0 +1,41 @@
+name: Build UnrealMemoryTools Android
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          add-to-path: true
+
+      - name: Set environment
+        run: echo "NDK_PATH=$ANDROID_NDK_HOME" >> $GITHUB_ENV
+
+      - name: Build with ndk-build
+        run: |
+          cd $GITHUB_WORKSPACE
+          ndk-build NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk APP_ABI=arm64-v8a APP_PLATFORM=android-24 NDK_OUT=obj NDK_LIBS_OUT=libs
+
+      - name: Upload compiled libs
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-libs
+          path: libs/
+
+      - name: Upload obj files
+        uses: actions/upload-artifact@v4
+        with:
+          name: obj-files
+          path: obj/
