@@ -21,7 +21,7 @@ public:
 
     std::vector<std::string> GetAppIDs() const override
     {
-        return {"com.tencent.tmgp.dfm"};
+        return {"com.tencent.tmgp.dfm", "com.proxima.dfm"};
     }
 
     bool isUsingCasePreservingName() const override
