@@ -1,6 +1,7 @@
 name: Build UnrealMemoryTools
 on:
   push:
+    branches: ["*"]
   pull_request:
   workflow_dispatch:
 
@@ -8,30 +9,37 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout source
+      - name: Checkout source & submodules
         uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
 
-      - name: Setup Android NDK
+      - name: Install build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y cmake ninja-build
+
+      - name: Setup Android NDK r25c
         uses: nttld/setup-ndk@v1
+        id: ndk
         with:
           ndk-version: r25c
 
-      - name: Create build dir
-        run: mkdir build && cd build
-
-      - name: CMake configure Android arm64
+      - name: Cmake configure override NDK path
         run: |
-          cmake -S . -B build \
-          -DCMAKE_TOOLCHAIN_FILE=${{ env.ANDROID_NDK_HOME }}/build/cmake/android.toolchain.cmake \
-          -DANDROID_ABI=arm64-v8a \
-          -DANDROID_PLATFORM=android-26 \
+          cmake -S . -B build -G Ninja \
+          -DNDK_PATH=${{ steps.ndk.outputs.ndk-path }} \
           -DCMAKE_BUILD_TYPE=Release
 
-      - name: Build
-        run: cmake --build build -j4
+      - name: Compile
+        run: cmake --build build -j$(nproc)
 
-      - name: Upload compiled binary
+      - name: Zip binary
+        run: zip -r UnrealMemoryTools_arm64.zip outputs/arm64-v8a/
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: UnrealMemoryTools-arm64
-          path: build/
+          name: Compiled_Binary
+          path: UnrealMemoryTools_arm64.zip
