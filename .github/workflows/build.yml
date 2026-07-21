@@ -1,7 +1,6 @@
 name: Build UnrealMemoryTools
 on:
   push:
-    branches: ["*"]
   pull_request:
   workflow_dispatch:
 
@@ -9,37 +8,34 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout source & submodules
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           submodules: true
-          fetch-depth: 0
 
-      - name: Install build dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y cmake ninja-build
+      - name: Install cmake ninja
+        run: sudo apt update && sudo apt install cmake ninja-build -y
 
-      - name: Setup Android NDK r25c
+      - name: Download NDK
         uses: nttld/setup-ndk@v1
         id: ndk
         with:
           ndk-version: r25c
 
-      - name: Cmake configure override NDK path
-        run: |
-          cmake -S . -B build -G Ninja \
-          -DNDK_PATH=${{ steps.ndk.outputs.ndk-path }} \
-          -DCMAKE_BUILD_TYPE=Release
+      # 核心：直接修改CMake文件里写死的Windows路径
+      - name: Fix CMake hard path
+        run: sed -i "s|set(NDK_PATH E:/ndk/android-ndk-r29)|set(NDK_PATH ${{ steps.ndk.outputs.ndk-path }})|" CMakeLists.txt
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
       - name: Compile
         run: cmake --build build -j$(nproc)
 
-      - name: Zip binary
-        run: zip -r UnrealMemoryTools_arm64.zip outputs/arm64-v8a/
+      - name: Pack
+        run: zip UnrealMemoryTools.zip outputs/arm64-v8a/UnrealMemoryTools
 
-      - name: Upload artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: Compiled_Binary
-          path: UnrealMemoryTools_arm64.zip
+          name: Output
+          path: UnrealMemoryTools.zip
