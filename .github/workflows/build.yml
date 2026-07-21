@@ -12,32 +12,32 @@ jobs:
         with:
           submodules: true
 
-      - name: Install tools
+      - name: Install build tools
         run: sudo apt update && sudo apt install cmake ninja-build -y
 
-      - name: Setup NDK r26b
+      - name: Setup NDK r25c (作者原版编译工具)
         uses: nttld/setup-ndk@v1
         id: ndk
         with:
-          ndk-version: r26b
+          ndk-version: r25c
 
-      - name: Fix hardcode path
+      - name: 替换CMake硬编码Windows路径
         run: sed -i "s|set(NDK_PATH E:/ndk/android-ndk-r29)|set(NDK_PATH ${{ steps.ndk.outputs.ndk-path }})|" CMakeLists.txt
 
-      - name: Configure
+      - name: CMake配置（核心宏解决json冲突）
         run: |
           cmake -S . -B build -G Ninja \
           -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_CXX_FLAGS="-fno-char8_t -Wno-ambiguous-operator"
+          -DCMAKE_CXX_FLAGS="-Wno-ambiguous-operator -DJSON_NO_CPP20_CHAR8_STRINGS"
 
-      - name: Compile
+      - name: 开始编译
         run: cmake --build build -j$(nproc)
 
-      - name: Pack
+      - name: 打包二进制
         run: zip UnrealMemoryTools.zip outputs/arm64-v8a/UnrealMemoryTools
 
-      - name: Upload
+      - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: Output
+          name: Compiled_Binary
           path: UnrealMemoryTools.zip
